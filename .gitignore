@@ -1,0 +1,13 @@
+kb_index.db
+knowledge_base/
+.cache/
+__pycache__/
+*.egg-info/
+*.pyc
+.DS_Store
+build/
+dist/
+.env
+*.db-journal
+*.db-wal
+*.db-shm

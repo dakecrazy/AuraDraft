@@ -1,0 +1,72 @@
+# Transformer 训练优化技术
+
+## 学习率调度
+
+Transformer 模型的训练对学习率非常敏感。常用的学习率调度策略包括：
+
+### Warmup + Decay
+在训练初期使用较小的学习率（warmup），然后逐步增大到峰值，再缓慢衰减。Noam 调度器是 Transformer 论文中使用的经典方案：
+
+learning_rate = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
+
+其中 d_model 是模型维度，warmup_steps 通常设为 4000。
+
+### Cosine 衰减
+余弦退火调度器（Cosine Annealing）让学习率按照余弦曲线从峰值衰减到最小值。配合重启策略（Cosine Annealing with Warm Restarts）可以跳出局部最优。
+
+## 梯度裁剪
+
+梯度裁剪（Gradient Clipping）防止梯度爆炸。常用的方法是将梯度的 L2 范数限制在一个阈值内：
+
+if ||g|| > threshold: g = g * threshold / ||g||
+
+阈值通常设为 1.0 或 0.5。对于大模型训练，梯度裁剪是必不可少的。
+
+## 混合精度训练
+
+混合精度训练（Mixed Precision Training）使用 FP16 或 BF16 来加速训练并减少显存占用。
+
+### FP16 训练
+- 前向和反向传播使用 FP16
+- 权重更新使用 FP32 主副本
+- 损失缩放（Loss Scaling）防止梯度下溢
+
+### BF16 训练
+BF16 具有与 FP32 相同的指数范围，但精度较低。它在训练稳定性上优于 FP16，因为不需要损失缩放。
+
+## 优化器选择
+
+### AdamW
+AdamW 是目前最流行的 Transformer 优化器。它将权重衰减与自适应学习率解耦：
+
+θ_t+1 = θ_t - η * (m_t / (√v_t + ε) + λθ_t)
+
+其中 λ 是权重衰减系数，通常设为 0.01 到 0.1。
+
+### 其他优化器
+- Adafactor：内存效率更高的 Adam 变体
+- Lion：Google 提出的新优化器，训练速度更快
+- Sophia：基于梯度的二阶优化器
+
+## 正则化
+
+### Dropout
+在注意力层和前馈网络层之间添加 Dropout，防止过拟合。标准 Transformer 使用 dropout=0.1。
+
+### Label Smoothing
+标签平滑将 one-hot 标签替换为平滑分布，提高泛化能力。通常使用 ε=0.1 的标签平滑。
+
+## 分布式训练
+
+### 数据并行
+每个 GPU 处理不同的数据批次，梯度同步后更新参数。
+
+### 模型并行
+将模型的不同层分布到不同 GPU 上，解决单卡显存不足的问题。
+
+### ZeRO 优化
+ZeRO（Zero Redundancy Optimizer）通过分片存储优化器状态、梯度和参数，大幅降低显存占用。
+
+## 总结
+
+Transformer 训练优化是一个系统工程，需要综合考虑学习率调度、梯度裁剪、混合精度、优化器选择和正则化等多个方面。随着模型规模的增长，分布式训练策略也变得至关重要。

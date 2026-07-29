@@ -1,0 +1,49 @@
+# 深度学习中的注意力机制
+
+## 引言
+
+注意力机制（Attention Mechanism）是深度学习领域最重要的创新之一。它允许模型在处理输入序列时，动态地关注不同位置的信息，而不是将所有信息压缩到一个固定长度的向量中。
+
+## 自注意力（Self-Attention）
+
+自注意力机制的核心是查询（Query）、键（Key）和值（Value）三个矩阵。对于输入序列 X，我们计算：
+
+- Q = XW_Q
+- K = XW_K
+- V = XW_V
+
+然后计算注意力权重：
+Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) V
+
+其中 d_k 是键向量的维度，除以 sqrt(d_k) 是为了防止内积过大导致 softmax 梯度消失。
+
+## 多头注意力（Multi-Head Attention）
+
+Transformer 使用多头注意力机制，将查询、键和值分别投影到 h 个不同的子空间，并行计算注意力，然后拼接结果：
+
+MultiHead(Q,K,V) = Concat(head_1, ..., head_h) W_O
+
+每个 head_i = Attention(QW_i^Q, KW_i^K, VW_i^V)
+
+多头注意力允许模型同时关注不同位置的不同表示子空间。
+
+## 计算复杂度
+
+标准注意力的计算复杂度是 O(n^2)，其中 n 是序列长度。这限制了它在长序列上的应用。后续工作提出了多种优化方案：
+
+- 稀疏注意力（Sparse Attention）：只计算部分位置的注意力
+- 线性注意力（Linear Attention）：将复杂度降到 O(n)
+- Flash Attention：通过 IO 感知的算法优化实际运行时间
+
+## 应用
+
+注意力机制广泛应用于：
+1. 机器翻译
+2. 文本摘要
+3. 图像描述
+4. 语音识别
+5. 代码生成
+
+## 总结
+
+注意力机制已经成为现代深度学习的基础构件，从 Transformer 到 BERT、GPT 系列，都离不开它的支持。
