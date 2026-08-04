@@ -16,6 +16,7 @@ Subcommands:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,8 +30,8 @@ from kb_agent.tools import (
     kb_assign, kb_create, kb_update_card, kb_search, kb_archive,
 )
 
-DB_PATH = "kb_index.db"
-ARCHIVE_ROOT = "./knowledge_base"
+DB_PATH = os.environ.get("KB_AGENT_DB", str(Path.home() / ".kb-agent" / "kb_index.db"))
+ARCHIVE_ROOT = os.environ.get("KB_AGENT_ARCHIVE", str(Path.home() / ".kb-agent" / "knowledge_base"))
 
 
 def main() -> None:

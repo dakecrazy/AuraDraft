@@ -1,213 +1,235 @@
 ---
 name: kb-agent
-description: "Token-based knowledge base with MoE routing — 8 atomic tools for Hermes orchestration."
-version: 0.1.0
-author: Hermes Agent + User
-license: MIT
-platforms: [macos, linux]
-metadata:
-  hermes:
-    tags: [knowledge-base, token-index, moe-routing, document-classification]
-    related_skills: []
+description: "Token-based knowledge base with MoE-inspired routing. 8 atomic CLI tools for document indexing (tiktoken + BM25), statistical clustering (TF-IDF signatures + cosine similarity), knowledge card management, and physical archiving. Zero LLM calls — designed for agent orchestration."
 ---
 
 # kb-agent
 
-**Token-based knowledge base with MoE-inspired routing.**
+Token-based knowledge base with MoE-inspired routing. Indexes documents using tiktoken's o200k_base tokenizer, builds three-layer token indices (inverted postings + bigram + packed chunks), and clusters them via TF-IDF signature similarity. Exposes 8 atomic CLI tools for agent orchestration — zero LLM calls inside the tools themselves.
 
-kb-agent 是一个知识库基础设施层（零 LLM 调用），暴露 8 个原子工具给 Hermes 编排。Hermes 负责"理解"环节（读文档、做分类决策、写 knowledge_card、发现跨域联系），kb-agent 负责"存储和检索"环节（tokenize、索引、聚类、搜索、归档）。
+## When to use
 
-## 架构概览
+- Index and search documents by token-level BM25 (not embedding)
+- Automatically cluster documents by token-frequency similarity
+- Maintain evolving "knowledge cards" per cluster across sessions
+- Archive documents into a structured `knowledge_base/{label}/` tree
+- Batch ingest 100+ documents with deterministic routing
 
-```
-Hermes（推理层 — 你）
-  │
-  ├── kb_ingest(file)        → doc_id          ← 索引文档
-  ├── kb_prefilter(doc_id)   → [候选簇]         ← 统计预筛
-  ├── kb_get_cards(cids)     → {card_text}      ← 读知识档案
-  │
-  ├── [Hermes 决策：归入现有簇 or 创建新簇]
-  │
-  ├── kb_assign(doc_id, cid)                    ← 归入现有簇
-  │   └── kb_archive(file, label)               ← 物理归档
-  │
-  ├── kb_create(label, card, doc_id) → cid      ← 创建新簇
-  │   └── kb_archive(file, label)               ← 物理归档
-  │
-  ├── kb_update_card(cid, card_text)            ← 更新知识档案
-  ├── kb_search(query)        → [搜索结果]       ← BM25 检索
-  └── kb_archive(file, label) → archived_path   ← 物理归档
+## Prerequisites
+
+The package is installed in a venv at the skill directory. Activate it before use:
+
+```bash
+source /home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/activate
 ```
 
-## 8 个原子工具
+Or call the CLI with the venv Python directly:
 
-所有工具通过 CLI 调用：`python -m kb_agent.tools.cli <cmd> <args>`
+```bash
+/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/python -m kb_agent.tools.cli <cmd> <args>
+```
 
-### 1. kb_ingest — 索引文档
+## Data paths
+
+- **Database:** `kb_index.db` (relative to working directory — set with `KB_AGENT_DB` env var to override)
+- **Archive:** `./knowledge_base/` (override with `KB_AGENT_ARCHIVE` env var)
+- **Token cache:** `.cache/tiktoken/`
+
+Default DB location is the current working directory. For consistency, set `KB_AGENT_DB` to an absolute path.
+
+## 8 Atomic Tools
+
+All tools via CLI: `python -m kb_agent.tools.cli <cmd> <args>`
+
+### 1. ingest — Index a document
 
 ```bash
 python -m kb_agent.tools.cli ingest <file> [doc_id] [category]
 ```
 
-将文档 tokenize、切 chunk、建三层索引（倒排 + bigram + chunk）。**不分类、不归档。** 返回 `doc_id`。
+Tokenizes, chunks (256 tokens, 32 overlap), builds inverted + bigram + chunk index. Does NOT classify or assign. Returns `{doc_id, total_tokens, chunk_count, unique_tokens}`.
 
-**关键约束：** 不返回 signature（存在 DB 内部，`kb_prefilter` 自动读取）。
-
-### 2. kb_prefilter — 统计预筛
+### 2. prefilter — Statistical pre-screening
 
 ```bash
 python -m kb_agent.tools.cli prefilter <doc_id>
 ```
 
-从 `doc_signatures` 表读取文档的 token 签名，和所有簇质心算余弦相似度，返回 Top-K 候选簇。当簇数 ≤ top_k 时返回全部。
+Reads the document's token signature from DB, computes cosine similarity against all cluster centroids, returns Top-K candidates. Returns `[]` if no clusters exist.
 
-**返回格式：**
 ```json
-[{"cluster_id": "...", "label": "...", "similarity": 0.42, "doc_count": 5}]
+[{"cluster_id": "76bf7f85", "label": "深度学习", "similarity": 0.1379, "doc_count": 2}]
 ```
 
-### 3. kb_get_cards — 读知识档案
+### 3. get-cards — Read knowledge cards
 
 ```bash
 python -m kb_agent.tools.cli get-cards <cid> [cid ...]
 ```
 
-返回指定簇的 knowledge_card 文本。
+Returns `{cluster_id: card_text}` for the requested clusters.
 
-### 4. kb_assign — 归入现有簇
-
-```bash
-python -m kb_agent.tools.cli assign <doc_id> <cluster_id> [card_text]
-```
-
-将文档加入簇（更新质心 + 成员列表）。可选更新 knowledge_card。**自动更新 token doc-frequency。**
-
-### 5. kb_create — 创建新簇
+### 4. assign — Assign document to existing cluster
 
 ```bash
-python -m kb_agent.tools.cli create <label> <doc_id> [card_text]
+cat card.txt | python -m kb_agent.tools.cli assign <doc_id> <cluster_id>
 ```
 
-以文档为第一个成员创建新簇。返回 `cluster_id`。
+Card text from stdin (supports multiline). Updates cluster centroid (running average) and token doc-frequency.
 
-### 6. kb_update_card — 更新知识档案
+### 5. create — Create new cluster
 
 ```bash
-echo "新的知识档案内容" | python -m kb_agent.tools.cli update-card <cluster_id>
+cat card.txt | python -m kb_agent.tools.cli create <label> <doc_id>
 ```
 
-从 stdin 读取 card_text，更新簇的 knowledge_card。
+Creates a new cluster with the document as first member. Card text from stdin.
 
-### 7. kb_search — BM25 检索
+### 6. update-card — Update knowledge card
+
+```bash
+echo "new card content" | python -m kb_agent.tools.cli update-card <cluster_id>
+```
+
+### 7. search — BM25 retrieval
 
 ```bash
 python -m kb_agent.tools.cli search <query> [top_k] [mode]
 ```
 
-模式：`exact`（倒排）、`phrase`（bigram）、`hybrid`（默认，0.6+0.4）。
+Modes: `exact` (inverted index), `phrase` (bigram), `hybrid` (default: 0.6×exact + 0.4×phrase).
 
-### 8. kb_archive — 物理归档
+### 8. archive — Physical archiving
 
 ```bash
 python -m kb_agent.tools.cli archive <file> <label> [doc_id]
 ```
 
-复制文件到 `knowledge_base/{label}/`。处理文件名冲突。
+Copies file to `knowledge_base/{label}/`. Handles filename conflicts with doc_id suffix.
 
-## 编排工作流
+## Orchestration workflow
 
-### 标准流程（每篇文档）
+### Standard ingest flow (per document)
 
 ```
-1. kb_ingest(file)           → doc_id
-2. kb_prefilter(doc_id)      → [候选簇] 或 []
-3. if 候选簇:
-     kb_get_cards([cids])    → 读知识档案
-     [Hermes 判断：归入哪个簇？]
-     kb_assign(doc_id, cid)  → 归簇
+1. ingest(file)           → doc_id
+2. prefilter(doc_id)      → candidates[] or []
+3. if candidates:
+     get-cards([cids])    → read knowledge cards
+     [agent decides: which cluster?]
+     assign(doc_id, cid)  ← pipe new card via stdin if updating
    else:
-     [Hermes 生成 label + card]
-     kb_create(label, card, doc_id) → 新簇
-4. kb_archive(file, label)   → 物理归档
+     [agent generates label + card]
+     create(label, doc_id) ← pipe card via stdin
+4. archive(file, label, doc_id)
 ```
 
-### 查询流程
+### Query flow
 
 ```
-1. kb_search(query)          → [搜索结果]
-2. [Hermes 读 chunk 文本 + 生成回答]
+1. search(query)          → ranked results with scores
+2. [agent reads chunks via get_chunk_text or opens file directly]
 ```
 
-### 批量摄入（100+ 篇文档）
+### Batch ingest (100+ docs)
 
-对于批量场景，在单个 `terminal()` 中运行 Python 脚本避免每次加载 tiktoken：
+For batch, run a Python script in a single process to avoid repeated tiktoken loading (~2s per CLI call):
 
 ```python
-from kb_agent.tools import init_kb, kb_ingest, kb_prefilter, kb_get_cards, kb_assign, kb_create, kb_archive
-from kb_agent.document.loader import iter_documents
+import subprocess, sys
+script = '''
+import sys
+sys.path.insert(0, "/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/src")
+from kb_agent.tools.session import KnowledgeBaseSession
+from kb_agent.tools.ops import kb_ingest, kb_prefilter, kb_assign, kb_create, kb_archive
+from pathlib import Path
 
-session = init_kb("kb_index.db")
+session = KnowledgeBaseSession("kb_index.db")
 session.connect()
 
-for f in iter_documents("./docs/"):
+for f in Path("./docs/").glob("*.txt"):
     r = kb_ingest(session, str(f))
     doc_id = r["doc_id"]
     candidates = kb_prefilter(session, doc_id)
     if candidates:
-        # Hermes 需要判断归入哪个簇
-        # 这里简化：归入相似度最高的
-        cid = candidates[0]["cluster_id"]
-        kb_assign(session, doc_id, cid)
+        kb_assign(session, doc_id, candidates[0]["cluster_id"])
     else:
         kb_create(session, "新领域", "初始知识档案", doc_id)
-    kb_archive(session, str(f), "新领域")
+    kb_archive(session, str(f), "新领域", doc_id)
 
 session.close()
+'''
+subprocess.run(["/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/python", "-c", script])
 ```
 
-## 关键约束
+## Visualization
 
-1. **Hermes 永远不接触 signature** — signature 在 `kb_ingest` 时存入 `doc_signatures` 表，`kb_prefilter` 自动读取。调用方只传 `doc_id`。
-2. **knowledge_card 是 Hermes 写入的文本** — 存 SQLite 跨会话持久化。Hermes 负责生成和更新 card 内容。
-3. **token doc-frequency 在 assign/create 时更新** — 不在 ingest 时更新，确保 IDF 不包含"自己"。
-4. **物理归档后索引路径自动更新** — `kb_archive` 后索引中的 `file_path` 指向归档位置。
+`visualize.py` generates standalone HTML pages from the knowledge base DB. No server required — any agent or human can open the HTML in a browser.
 
-## 安装
+### Bubble view (default) — interactive D3 force-directed map
 
 ```bash
-cd ~/kb_agent
-pip install -e .
+python visualize.py --mode bubble
+# → ~/.kb-agent/bubble.html
 ```
 
-依赖：`tiktoken`、`numpy`（自动安装）。
+Each cluster is a draggable bubble. Bubble size = doc count. Inside each bubble, top-20 tokens float with gentle animation. Inter-cluster links show cosine similarity. Click a bubble for details, search tokens across all clusters.
 
-## 数据存储
+### Cards view — static summary
 
-| 数据 | 位置 | 说明 |
-|------|------|------|
-| 索引 + 簇 | `kb_index.db` | SQLite，WAL 模式 |
-| 物理文件 | `knowledge_base/{label}/` | 归档后的文档副本 |
-| Token 缓存 | `.cache/tiktoken/` | BPE 文件缓存 |
+```bash
+python visualize.py --mode cards
+# → ~/.kb-agent/visualization.html
+```
 
-## 设计决策
+Card-based layout: per-cluster knowledge cards, token signature bars, similarity matrix heatmap, timeline.
 
-### 为什么用 CLI 桥接而不是 Python import？
+### Options
 
-Hermes skill 的范式是工具调用，每个工具是一个独立的 `terminal()` 命令。CLI 调用让 Hermes 不需要管理 Python session 生命周期。对于批量场景，提供 Python 脚本模板在单个 `terminal()` 中执行。
+```bash
+python visualize.py --db ./custom.db --mode bubble --output ~/viz.html
+python visualize.py --mode cards --db ~/.kb-agent/kb_index.db
+```
 
-### 为什么 signature 存 DB 而不是返回给调用方？
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `~/.kb-agent/kb_index.db` | Database path |
+| `--mode` | `bubble` | `bubble` or `cards` |
+| `--output` | Auto (alongside DB) | Output HTML path |
 
-Signature 是 128 个 token_id→weight 对，约 2KB。如果每篇文档都返回给 Hermes，100 篇文档就是 200KB 上下文浪费。存 DB 后调用方只传 `doc_id`（12 字节），signature 在 `kb_prefilter` 内部读取。
+Works with any agent runtime (OpenClaw, Hermes, standalone Python). Generated HTML is self-contained — only external dependency is the D3.js CDN.
 
-### 为什么 knowledge_card 存 SQLite？
+## Key constraints
 
-跨会话持久化。Hermes 的上下文是会话级的，重启后丢失。SQLite 中的 knowledge_card 在重启后仍然可用，且和簇绑定。
+- **ingest → must assign or create** — otherwise document has index but no cluster, won't appear in search
+- **Signature stays in DB** — `kb_prefilter` reads it internally, never returned to caller
+- **archive copies, not moves** — source file preserved
+- **SQLite WAL mode** — avoid concurrent writes from multiple processes
+- **CLI cold start ~2s** — tiktoken BPE loading; use Python script for batch
 
-## Pitfalls
+## Architecture
 
-- **CLI 每次调用加载 tiktoken ~2 秒** — 批量摄入用 Python 脚本模板
-- **`kb_ingest` 后必须 `kb_assign` 或 `kb_create`** — 否则文档只有索引没有归属，不会被搜索到
-- **`kb_archive` 复制文件，不移动** — 源文件保留
-- **`kb_prefilter` 在簇数 ≤ top_k 时返回全部** — 不设相似度门槛
-- **`kb_update_card` 从 stdin 读取** — 用 `echo "..." |` 或 heredoc
-- **SQLite 文件锁** — 不要同时运行多个 CLI 命令操作同一个 DB
+```
+Agent (reasoning layer)
+  │
+  ├── kb_ingest(file)        → doc_id
+  ├── kb_prefilter(doc_id)   → candidate clusters (L0: statistical)
+  ├── kb_get_cards(cids)     → knowledge card texts
+  │
+  ├── [Agent decides: assign or create]
+  │
+  ├── kb_assign(doc_id, cid) / kb_create(label, card, doc_id)
+  ├── kb_update_card(cid, card_text)
+  ├── kb_search(query)       → BM25 ranked results
+  └── kb_archive(file, label) → archived_path
+```
+
+Three-layer index:
+- **Layer 1:** Token inverted index (BM25 scoring, K1=1.2, B=0.75)
+- **Layer 2:** Bigram phrase index (deterministic composite keys)
+- **Layer 3:** Packed chunk token sequences (struct-encoded binary)
+
+MoE routing principle:
+- **L0 (free, ms):** Token frequency signature → cosine similarity → Top-K candidates
+- **L1 (LLM, tokens):** Agent reads Top-K knowledge cards → semantic judgment
+- Scales to 10000+ clusters with bounded compute
