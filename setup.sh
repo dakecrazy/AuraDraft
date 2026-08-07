@@ -56,25 +56,43 @@ if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
 fi
 
 # ---- 4. Install (absolute path — never rely on PATH/activate) ---------------
-# Probe a proxy if none is set in the environment. Clash/V2Ray expose an HTTP
-# proxy on common ports (Clash default 7890); without it pip may hang or fail
-# on slow/throttled networks. Respect an existing HTTP_PROXY/HTTPS_PROXY first.
-_proxy=""
-if [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
+# Prefer a fast PyPI mirror (CN direct), fall back to a local proxy, then
+# plain direct. Mirrors are far faster and more reliable on throttled/GFW
+# networks than a proxy tunnel. Respect an existing HTTP_PROXY/HTTPS_PROXY.
+_pip_flags=""
+
+# Tier 1: PyPI mirrors (fastest in CN) — override with KB_AGENT_PIP_INDEX
+if [ -n "${KB_AGENT_PIP_INDEX:-}" ]; then
+    _pip_flags="-i $KB_AGENT_PIP_INDEX"
+    echo "Using PyPI index: $KB_AGENT_PIP_INDEX"
+elif [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
+    for _m in "https://pypi.tuna.tsinghua.edu.cn/simple" "https://mirrors.aliyun.com/pypi/simple"; do
+        if curl -sI --max-time 3 "$_m/pip/" >/dev/null 2>&1; then
+            _pip_flags="-i $_m"
+            echo "Using PyPI mirror: $_m"
+            break
+        fi
+    done
+fi
+
+# Tier 2: mirror unreachable → probe a local proxy (Clash/V2Ray common ports)
+if [ -z "$_pip_flags" ] && [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
     for _p in 7890 7897 1087 8080; do
         if curl --proxy "http://127.0.0.1:$_p" -sI --max-time 3 https://pypi.org >/dev/null 2>&1; then
-            _proxy="--proxy http://127.0.0.1:$_p"
+            _pip_flags="--proxy http://127.0.0.1:$_p"
             echo "Using proxy: http://127.0.0.1:$_p"
             break
         fi
     done
 fi
 
-"$VENV_PY" -m pip install --upgrade pip $_proxy
-"$VENV_PY" -m pip install -e "$SCRIPT_DIR" $_proxy
+# Tier 3: neither → direct (flags empty)
+
+"$VENV_PY" -m pip install --upgrade pip $_pip_flags
+"$VENV_PY" -m pip install -e "$SCRIPT_DIR" $_pip_flags
 # PDF support (pymupdf) — separate install is faster than re-installing the
 # whole editable package with the [pdf] extra.
-"$VENV_PY" -m pip install $_proxy pymupdf || echo "  (pymupdf install skipped — PDF support optional)"
+"$VENV_PY" -m pip install $_pip_flags pymupdf || echo "  (pymupdf install skipped — PDF support optional)"
 
 echo
 echo "✓ kb-agent ready."

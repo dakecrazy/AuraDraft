@@ -26,7 +26,7 @@ The package is installed into a venv inside the skill directory. **One-time setu
 bash "$SKILL_DIR/setup.sh"
 ```
 
-This creates `$SKILL_DIR/.venv`, installs the package editable, and prints the exact activation + CLI commands. It respects a `KB_AGENT_PYTHON` env var if you need a specific interpreter. If no `HTTP_PROXY`/`HTTPS_PROXY` is set, setup.sh auto-probes common Clash/V2Ray proxy ports (7890/7897/1087/8080) so pip can reach PyPI on throttled networks. It also installs **pymupdf** for PDF text extraction (optional — PDFs fall back to PyPDF2 if absent).
+This creates `$SKILL_DIR/.venv`, installs the package editable, and prints the exact activation + CLI commands. It respects a `KB_AGENT_PYTHON` env var if you need a specific interpreter. Package installs use a **three-tier fallback**: fast PyPI mirror (Tsinghua/Aliyun) → local Clash/V2Ray proxy (7890/7897/1087/8080) → direct. It also installs **pymupdf** for PDF text extraction (optional — PDFs fall back to PyPDF2 if absent).
 
 After setup, activate the venv:
 
