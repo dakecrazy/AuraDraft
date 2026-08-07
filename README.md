@@ -49,7 +49,7 @@ Hermes（推理层 — agent）
 
 ## 8 个原子工具
 
-所有工具通过 CLI 调用：`python -m kb_agent.tools.cli <cmd> <args>`
+所有工具通过 CLI 调用：`"$SKILL_DIR/bin/kb" <cmd> <args>`
 
 | 工具 | 用途 | 是否调 LLM |
 |------|------|:---:|
@@ -65,7 +65,7 @@ Hermes（推理层 — agent）
 ### 1. kb_ingest — 索引文档
 
 ```bash
-python -m kb_agent.tools.cli ingest <file> [doc_id] [category]
+"$SKILL_DIR/bin/kb" ingest <file> [doc_id] [category]
 ```
 
 将文档 tokenize、切 chunk、建三层索引（倒排 + bigram + chunk）。**不分类、不归档。** 返回 `doc_id`。
@@ -73,7 +73,7 @@ python -m kb_agent.tools.cli ingest <file> [doc_id] [category]
 ### 2. kb_prefilter — 统计预筛
 
 ```bash
-python -m kb_agent.tools.cli prefilter <doc_id>
+"$SKILL_DIR/bin/kb" prefilter <doc_id>
 ```
 
 从 `doc_signatures` 表读取文档的 token 签名，和所有簇质心算余弦相似度，返回 Top-K 候选簇。当簇数 ≤ top_k 时返回全部。
@@ -85,13 +85,13 @@ python -m kb_agent.tools.cli prefilter <doc_id>
 ### 3. kb_get_cards — 读知识档案
 
 ```bash
-python -m kb_agent.tools.cli get-cards <cid> [cid ...]
+"$SKILL_DIR/bin/kb" get-cards <cid> [cid ...]
 ```
 
 ### 4. kb_assign — 归入现有簇
 
 ```bash
-cat card.txt | python -m kb_agent.tools.cli assign <doc_id> <cluster_id>
+cat card.txt | "$SKILL_DIR/bin/kb" assign <doc_id> <cluster_id>
 ```
 
 card_text 从 stdin 读取（支持多行中文）。自动更新 token doc-frequency。
@@ -99,19 +99,19 @@ card_text 从 stdin 读取（支持多行中文）。自动更新 token doc-freq
 ### 5. kb_create — 创建新簇
 
 ```bash
-cat card.txt | python -m kb_agent.tools.cli create <label> <doc_id>
+cat card.txt | "$SKILL_DIR/bin/kb" create <label> <doc_id>
 ```
 
 ### 6. kb_update_card — 更新知识档案
 
 ```bash
-echo "新的知识档案内容" | python -m kb_agent.tools.cli update-card <cluster_id>
+echo "新的知识档案内容" | "$SKILL_DIR/bin/kb" update-card <cluster_id>
 ```
 
 ### 7. kb_search — BM25 检索
 
 ```bash
-python -m kb_agent.tools.cli search <query> [top_k] [mode]
+"$SKILL_DIR/bin/kb" search <query> [top_k] [mode]
 ```
 
 模式：`exact`（倒排）、`phrase`（bigram）、`hybrid`（默认，0.6+0.4）。
@@ -119,7 +119,7 @@ python -m kb_agent.tools.cli search <query> [top_k] [mode]
 ### 8. kb_archive — 物理归档
 
 ```bash
-python -m kb_agent.tools.cli archive <file> <label> [doc_id]
+"$SKILL_DIR/bin/kb" archive <file> <label> [doc_id]
 ```
 
 复制文件到 `knowledge_base/{label}/`。自动更新索引中的 `file_path`。
@@ -130,34 +130,37 @@ python -m kb_agent.tools.cli archive <file> <label> [doc_id]
 
 ```bash
 # 1. 索引
-python -m kb_agent.tools.cli ingest paper.txt doc_001
+"$SKILL_DIR/bin/kb" ingest paper.txt doc_001
 
 # 2. 预筛
-python -m kb_agent.tools.cli prefilter doc_001
+"$SKILL_DIR/bin/kb" prefilter doc_001
 # → []（第一篇文档）
 
 # 3. 创建簇（Hermes 生成 label + card）
-cat <<'CARD' | python -m kb_agent.tools.cli create "领域名" doc_001
+cat <<'CARD' | "$SKILL_DIR/bin/kb" create "领域名" doc_001
 领域：领域名
 核心知识：...
 CARD
 
 # 4. 归档
-python -m kb_agent.tools.cli archive paper.txt "领域名" doc_001
+"$SKILL_DIR/bin/kb" archive paper.txt "领域名" doc_001
 ```
 
 ### 查询流程
 
 ```bash
-python -m kb_agent.tools.cli search "注意力机制的计算复杂度"
+"$SKILL_DIR/bin/kb" search "注意力机制的计算复杂度"
 # → [dl_001: 15.81, dl_002: 1.44, legal_001: 0.24]
 ```
 
 ### 批量摄入（100+ 篇文档）
 
-在单个 `terminal()` 中运行 Python 脚本避免每次加载 tiktoken：
+在单个进程中运行 Python 脚本，避免每次加载 tiktoken（每次 CLI 冷启动约 2s）。用 `kb-python` 包装器运行，自动剥离 PYTHONPATH 污染：
 
-```python
+```bash
+"$SKILL_DIR/bin/kb-python" - "$SKILL_DIR" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/src")
 from kb_agent.tools import init_kb, kb_ingest, kb_prefilter, kb_assign, kb_create, kb_archive
 from kb_agent.document.loader import iter_documents
 
@@ -176,14 +179,21 @@ for f in iter_documents("./docs/"):
     kb_archive(session, str(f), "新领域")
 
 session.close()
+PY
 ```
 
 ## 安装
 
+> **`$SKILL_DIR`** = 本 skill 所在目录（含 `SKILL.md` 的目录）。任何 agent 运行时（OpenClaw / Hermes / 独立）都知道自己的 skills 路径，替换成实际路径即可。全文档无硬编码路径。
+
 ```bash
-git clone https://github.com/dakecrazy/kb-agent.git
-cd kb-agent
-pip install -e .
+bash setup.sh   # 自定位：创建 .venv、安装依赖、打印 CLI 命令
+```
+
+`setup.sh` 会创建 `$SKILL_DIR/.venv` 并以 editable 方式安装，自动探测 Python ≥3.10（可用 `KB_AGENT_PYTHON` 指定解释器），并清除宿主环境的 `PYTHONPATH` 污染。之后用包装器调用：
+
+```bash
+"$SKILL_DIR/bin/kb" <cmd> <args>   # 自动剥离 PYTHONPATH，任何运行时都可用
 ```
 
 依赖：`tiktoken`、`numpy`（自动安装）。
@@ -210,15 +220,15 @@ ln -s /path/to/kb-agent ~/.hermes/skills/data-science/kb-agent
 
 ```
 # 1. 索引 dl_001（注意力机制综述）
-$ python -m kb_agent.tools.cli ingest tests/fixtures/sample_docs/deep_learning_attention.txt dl_001
+$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/deep_learning_attention.txt dl_001
 → doc_id=dl_001, tokens=464
 
 # 2. 预筛 → 空（第一篇文档）
-$ python -m kb_agent.tools.cli prefilter dl_001
+$ "$SKILL_DIR/bin/kb" prefilter dl_001
 → []
 
 # 3. Hermes 读文档 → 创建「深度学习」簇
-$ cat <<CARD | python -m kb_agent.tools.cli create "深度学习" dl_001
+$ cat <<CARD | "$SKILL_DIR/bin/kb" create "深度学习" dl_001
 领域：深度学习 - 注意力机制
 【核心知识】自注意力 Q/K/V、多头注意力、复杂度 O(n²)
 【知识演进】2017 Transformer → Flash Attention
@@ -226,34 +236,34 @@ CARD
 → cluster_id=76bf7f85
 
 # 4. 索引 legal_001（买卖合同）
-$ python -m kb_agent.tools.cli ingest tests/fixtures/sample_docs/legal_contract.txt legal_001
+$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/legal_contract.txt legal_001
 
 # 5. 预筛 → 深度学习簇（相似度 0.0105，明显不匹配）
-$ python -m kb_agent.tools.cli prefilter legal_001
+$ "$SKILL_DIR/bin/kb" prefilter legal_001
 → [{cluster_id: 76bf7f85, similarity: 0.0105}]
 
 # 6. Hermes 判断 → 创建「法律合同」簇
-$ cat <<CARD | python -m kb_agent.tools.cli create "法律合同" legal_001
+$ cat <<CARD | "$SKILL_DIR/bin/kb" create "法律合同" legal_001
 领域：法律合同 - 买卖合同
 CARD
 → cluster_id=73ba330e
 
 # 7. 索引 dl_002（训练优化技术）
-$ python -m kb_agent.tools.cli ingest tests/fixtures/sample_docs/deep_learning_training.txt dl_002
+$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/deep_learning_training.txt dl_002
 
 # 8. 预筛 → 深度学习 0.1379，法律合同 0.0119
-$ python -m kb_agent.tools.cli prefilter dl_002
+$ "$SKILL_DIR/bin/kb" prefilter dl_002
 → [{深度学习: 0.1379}, {法律合同: 0.0119}]
 
 # 9. Hermes 判断 → 归入深度学习簇，更新知识档案
-$ cat <<CARD | python -m kb_agent.tools.cli assign dl_002 76bf7f85
+$ cat <<CARD | "$SKILL_DIR/bin/kb" assign dl_002 76bf7f85
 领域：深度学习
 【核心知识】注意力机制 + 训练优化（学习率调度、混合精度、AdamW）
 CARD
 → doc_count=2, card_updated=true
 
 # 10. 搜索验证
-$ python -m kb_agent.tools.cli search "注意力机制的计算复杂度"
+$ "$SKILL_DIR/bin/kb" search "注意力机制的计算复杂度"
 → dl_001: 15.81, dl_002: 1.44, legal_001: 0.24
 ```
 

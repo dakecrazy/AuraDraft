@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# kb-python — sanitized Python launcher for kb-agent.
+# Runs the venv python with PYTHONPATH (and pip overrides) stripped, so a
+# polluted parent environment (Hermes/OpenClaw/shell profile) can never shadow
+# the venv's own site-packages with mismatched native extensions.
+# Self-locating via BASH_SOURCE — works wherever the skill is installed.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ ! -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    echo "ERROR: venv not found. Run: bash \"$SCRIPT_DIR/setup.sh\"" >&2
+    exit 1
+fi
+exec env -u PYTHONPATH -u PIP_TARGET -u PIP_PREFIX \
+     "$SCRIPT_DIR/.venv/bin/python" "$@"

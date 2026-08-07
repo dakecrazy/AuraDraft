@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# kb — kb-agent CLI shortcut.
+# Runs the CLI through the sanitized launcher so it works even when the parent
+# environment sets PYTHONPATH. Usage: bin/kb <cmd> <args>
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$SCRIPT_DIR/bin/kb-python" -m kb_agent.tools.cli "$@"

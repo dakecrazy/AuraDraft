@@ -12,3 +12,5 @@ dist/
 *.db-wal
 *.db-shm
 .venv/
+bubble.html
+visualization.html

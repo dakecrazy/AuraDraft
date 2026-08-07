@@ -17,34 +17,50 @@ Token-based knowledge base with MoE-inspired routing. Indexes documents using ti
 
 ## Prerequisites
 
-The package is installed in a venv at the skill directory. Activate it before use:
+> **`$SKILL_DIR`** throughout this document = the directory containing this `SKILL.md` file. Any agent runtime (OpenClaw, Hermes, standalone) knows where its skills live — substitute that path for `$SKILL_DIR`. No hardcoded paths.
+
+The package is installed into a venv inside the skill directory. **One-time setup** (self-locating, works on any machine / any runtime):
 
 ```bash
-source /home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/activate
+bash "$SKILL_DIR/setup.sh"
 ```
 
-Or call the CLI with the venv Python directly:
+This creates `$SKILL_DIR/.venv`, installs the package editable, and prints the exact activation + CLI commands. It respects a `KB_AGENT_PYTHON` env var if you need a specific interpreter.
+
+After setup, activate the venv:
 
 ```bash
-/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/python -m kb_agent.tools.cli <cmd> <args>
+source "$SKILL_DIR/.venv/bin/activate"
+```
+
+Or call the CLI with the venv Python directly (no activation needed):
+
+```bash
+"$SKILL_DIR/.venv/bin/python" -m kb_agent.tools.cli <cmd> <args>
 ```
 
 ## Data paths
 
-- **Database:** `kb_index.db` (relative to working directory — set with `KB_AGENT_DB` env var to override)
+- **Database:** defaults to `~/.kb-agent/kb_index.db` — override with the `KB_AGENT_DB` env var (e.g. `KB_AGENT_DB="$SKILL_DIR/kb_index.db"` to keep it beside the skill)
 - **Archive:** `./knowledge_base/` (override with `KB_AGENT_ARCHIVE` env var)
 - **Token cache:** `.cache/tiktoken/`
 
-Default DB location is the current working directory. For consistency, set `KB_AGENT_DB` to an absolute path.
+> **Note:** the CLI's default DB path is `~/.kb-agent/kb_index.db`, **not** the current working directory. If you want the DB stored alongside the skill, set `KB_AGENT_DB` explicitly. The skill directory's own `kb_index.db` is only used when you point `KB_AGENT_DB` at it.
 
 ## 8 Atomic Tools
 
-All tools via CLI: `python -m kb_agent.tools.cli <cmd> <args>`
+> **Before running any command below**, set `SKILL_DIR` to this skill's directory (the one containing this `SKILL.md`), e.g.:
+> ```bash
+> SKILL_DIR=~/.hermes/skills/data-science/kb-agent
+> ```
+> Substitute the real path for your runtime (OpenClaw, Hermes, standalone). Do **not** copy `$SKILL_DIR` literally — the shell will error with `unbound variable` under `set -u`.
+
+All tools via CLI: `"$SKILL_DIR/bin/kb" <cmd> <args>` — the `bin/kb` wrapper strips any polluted `PYTHONPATH` from the parent environment, so it works on any runtime (Hermes, OpenClaw, standalone) without activation.
 
 ### 1. ingest — Index a document
 
 ```bash
-python -m kb_agent.tools.cli ingest <file> [doc_id] [category]
+"$SKILL_DIR/bin/kb" ingest <file> [doc_id] [category]
 ```
 
 Tokenizes, chunks (256 tokens, 32 overlap), builds inverted + bigram + chunk index. Does NOT classify or assign. Returns `{doc_id, total_tokens, chunk_count, unique_tokens}`.
@@ -52,7 +68,7 @@ Tokenizes, chunks (256 tokens, 32 overlap), builds inverted + bigram + chunk ind
 ### 2. prefilter — Statistical pre-screening
 
 ```bash
-python -m kb_agent.tools.cli prefilter <doc_id>
+"$SKILL_DIR/bin/kb" prefilter <doc_id>
 ```
 
 Reads the document's token signature from DB, computes cosine similarity against all cluster centroids, returns Top-K candidates. Returns `[]` if no clusters exist.
@@ -64,7 +80,7 @@ Reads the document's token signature from DB, computes cosine similarity against
 ### 3. get-cards — Read knowledge cards
 
 ```bash
-python -m kb_agent.tools.cli get-cards <cid> [cid ...]
+"$SKILL_DIR/bin/kb" get-cards <cid> [cid ...]
 ```
 
 Returns `{cluster_id: card_text}` for the requested clusters.
@@ -72,7 +88,7 @@ Returns `{cluster_id: card_text}` for the requested clusters.
 ### 4. assign — Assign document to existing cluster
 
 ```bash
-cat card.txt | python -m kb_agent.tools.cli assign <doc_id> <cluster_id>
+cat card.txt | "$SKILL_DIR/bin/kb" assign <doc_id> <cluster_id>
 ```
 
 Card text from stdin (supports multiline). Updates cluster centroid (running average) and token doc-frequency.
@@ -80,7 +96,7 @@ Card text from stdin (supports multiline). Updates cluster centroid (running ave
 ### 5. create — Create new cluster
 
 ```bash
-cat card.txt | python -m kb_agent.tools.cli create <label> <doc_id>
+cat card.txt | "$SKILL_DIR/bin/kb" create <label> <doc_id>
 ```
 
 Creates a new cluster with the document as first member. Card text from stdin.
@@ -88,13 +104,13 @@ Creates a new cluster with the document as first member. Card text from stdin.
 ### 6. update-card — Update knowledge card
 
 ```bash
-echo "new card content" | python -m kb_agent.tools.cli update-card <cluster_id>
+echo "new card content" | "$SKILL_DIR/bin/kb" update-card <cluster_id>
 ```
 
 ### 7. search — BM25 retrieval
 
 ```bash
-python -m kb_agent.tools.cli search <query> [top_k] [mode]
+"$SKILL_DIR/bin/kb" search <query> [top_k] [mode]
 ```
 
 Modes: `exact` (inverted index), `phrase` (bigram), `hybrid` (default: 0.6×exact + 0.4×phrase).
@@ -102,7 +118,7 @@ Modes: `exact` (inverted index), `phrase` (bigram), `hybrid` (default: 0.6×exac
 ### 8. archive — Physical archiving
 
 ```bash
-python -m kb_agent.tools.cli archive <file> <label> [doc_id]
+"$SKILL_DIR/bin/kb" archive <file> <label> [doc_id]
 ```
 
 Copies file to `knowledge_base/{label}/`. Handles filename conflicts with doc_id suffix.
@@ -133,13 +149,14 @@ Copies file to `knowledge_base/{label}/`. Handles filename conflicts with doc_id
 
 ### Batch ingest (100+ docs)
 
-For batch, run a Python script in a single process to avoid repeated tiktoken loading (~2s per CLI call):
+For batch, run a Python script in a single process to avoid repeated tiktoken loading (~2s per CLI call). Set `SKILL_DIR` to the skill directory (the one containing this `SKILL.md`), then:
 
-```python
-import subprocess, sys
-script = '''
+```bash
+SKILL_DIR="<path to skill dir>"   # e.g. ~/.hermes/skills/data-science/kb-agent
+"$SKILL_DIR/bin/kb-python" - "$SKILL_DIR" <<'PY'
 import sys
-sys.path.insert(0, "/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/src")
+skill_dir = sys.argv[1]
+sys.path.insert(0, skill_dir + "/src")
 from kb_agent.tools.session import KnowledgeBaseSession
 from kb_agent.tools.ops import kb_ingest, kb_prefilter, kb_assign, kb_create, kb_archive
 from pathlib import Path
@@ -158,9 +175,10 @@ for f in Path("./docs/").glob("*.txt"):
     kb_archive(session, str(f), "新领域", doc_id)
 
 session.close()
-'''
-subprocess.run(["/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.venv/bin/python", "-c", script])
+PY
 ```
+
+The `"$SKILL_DIR/bin/kb-python" - "$SKILL_DIR"` form passes the skill dir as `sys.argv[1]`, so the script resolves `src/` relative to its own location — no hardcoded paths anywhere. The `kb-python` wrapper strips `PYTHONPATH` pollution, so the batch script's `import tiktoken` loads the venv's own native extension.
 
 ## Visualization
 
@@ -169,7 +187,7 @@ subprocess.run(["/home/dakecrazy/.openclaw/workspace-coding/skills/kb-agent/.ven
 ### Bubble view (default) — interactive D3 force-directed map
 
 ```bash
-python visualize.py --mode bubble
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode bubble
 # → ~/.kb-agent/bubble.html
 ```
 
@@ -178,7 +196,7 @@ Each cluster is a draggable bubble. Bubble size = doc count. Inside each bubble,
 ### Cards view — static summary
 
 ```bash
-python visualize.py --mode cards
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode cards
 # → ~/.kb-agent/visualization.html
 ```
 
@@ -187,8 +205,8 @@ Card-based layout: per-cluster knowledge cards, token signature bars, similarity
 ### Options
 
 ```bash
-python visualize.py --db ./custom.db --mode bubble --output ~/viz.html
-python visualize.py --mode cards --db ~/.kb-agent/kb_index.db
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --db ./custom.db --mode bubble --output ~/viz.html
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode cards --db ~/.kb-agent/kb_index.db
 ```
 
 | Flag | Default | Description |
