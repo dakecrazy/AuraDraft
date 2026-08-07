@@ -10,6 +10,7 @@ Token-based knowledge base with MoE-inspired routing. Indexes documents using ti
 ## When to use
 
 - Index and search documents by token-level BM25 (not embedding)
+- Index PDF documents (pymupdf extraction) alongside text files
 - Automatically cluster documents by token-frequency similarity
 - Maintain evolving "knowledge cards" per cluster across sessions
 - Archive documents into a structured `knowledge_base/{label}/` tree
@@ -25,7 +26,7 @@ The package is installed into a venv inside the skill directory. **One-time setu
 bash "$SKILL_DIR/setup.sh"
 ```
 
-This creates `$SKILL_DIR/.venv`, installs the package editable, and prints the exact activation + CLI commands. It respects a `KB_AGENT_PYTHON` env var if you need a specific interpreter.
+This creates `$SKILL_DIR/.venv`, installs the package editable, and prints the exact activation + CLI commands. It respects a `KB_AGENT_PYTHON` env var if you need a specific interpreter. If no `HTTP_PROXY`/`HTTPS_PROXY` is set, setup.sh auto-probes common Clash/V2Ray proxy ports (7890/7897/1087/8080) so pip can reach PyPI on throttled networks. It also installs **pymupdf** for PDF text extraction (optional — PDFs fall back to PyPDF2 if absent).
 
 After setup, activate the venv:
 
@@ -214,6 +215,16 @@ Card-based layout: per-cluster knowledge cards, token signature bars, similarity
 | `--db` | `~/.kb-agent/kb_index.db` | Database path |
 | `--mode` | `bubble` | `bubble` or `cards` |
 | `--output` | Auto (alongside DB) | Output HTML path |
+
+### Live refresh (watch mode)
+
+`visualize.py` is a one-shot static generator — it does **not** auto-update when the DB changes. To keep an open browser tab live, run the watcher:
+
+```bash
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/watch_visualize.py" --interval 5
+```
+
+It polls the DB mtime, regenerates the HTML on change, and injects `<meta http-equiv="refresh">` so the browser reloads automatically. `--interval` sets both the poll and reload cadence (default 5s). Ctrl-C to stop.
 
 Works with any agent runtime (OpenClaw, Hermes, standalone Python). Generated HTML is self-contained — only external dependency is the D3.js CDN.
 

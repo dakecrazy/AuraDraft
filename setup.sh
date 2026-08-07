@@ -56,8 +56,25 @@ if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
 fi
 
 # ---- 4. Install (absolute path — never rely on PATH/activate) ---------------
-"$VENV_PY" -m pip install --upgrade pip
-"$VENV_PY" -m pip install -e "$SCRIPT_DIR"
+# Probe a proxy if none is set in the environment. Clash/V2Ray expose an HTTP
+# proxy on common ports (Clash default 7890); without it pip may hang or fail
+# on slow/throttled networks. Respect an existing HTTP_PROXY/HTTPS_PROXY first.
+_proxy=""
+if [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
+    for _p in 7890 7897 1087 8080; do
+        if curl --proxy "http://127.0.0.1:$_p" -sI --max-time 3 https://pypi.org >/dev/null 2>&1; then
+            _proxy="--proxy http://127.0.0.1:$_p"
+            echo "Using proxy: http://127.0.0.1:$_p"
+            break
+        fi
+    done
+fi
+
+"$VENV_PY" -m pip install --upgrade pip $_proxy
+"$VENV_PY" -m pip install -e "$SCRIPT_DIR" $_proxy
+# PDF support (pymupdf) — separate install is faster than re-installing the
+# whole editable package with the [pdf] extra.
+"$VENV_PY" -m pip install $_proxy pymupdf || echo "  (pymupdf install skipped — PDF support optional)"
 
 echo
 echo "✓ kb-agent ready."

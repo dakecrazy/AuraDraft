@@ -9,6 +9,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pdf = [
+    "pymupdf>=1.24",
+    "PyPDF2>=3.0",
+]
 full = [
     "transformers>=4.40",
     "sentencepiece>=0.2",
