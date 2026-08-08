@@ -2,9 +2,13 @@
 """One-shot KB bubble refresh for Hermes cron.
 
 Runs every cron tick (1 min). Compares the DB mtime against a state file;
-regenerates bubble.html + injects meta-refresh ONLY when the DB changed.
-Silent (no stdout) when unchanged — so with --no-agent cron mode, an
-unchanged tick delivers nothing (no spam).
+regenerates bubble.html ONLY when the DB changed. Silent (no stdout) when
+unchanged — so with --no-agent cron mode, an unchanged tick delivers nothing
+(no spam).
+
+Live refresh needs no client code: the Electron webview auto-reloads a
+file:// page when the file changes on disk. So this script just rewrites
+bubble.html on DB change and the open preview pane updates itself.
 
 Because the Hermes cron ticker runs inside the gateway process, this job
 starts and stops with Hermes automatically.
@@ -17,8 +21,9 @@ from pathlib import Path
 DB = Path.home() / ".kb-agent" / "kb_index.db"
 STATE = Path.home() / ".kb-agent" / ".bubble_last_mtime"
 VIZ = Path.home() / "kb_agent" / "visualize.py"
-VENV_PY = Path.home() / "kb_agent" / ".venv" / "bin" / "python"
-REFRESH_INTERVAL = 60  # browser meta-refresh seconds (align with cron 1-min tick)
+# Use the kb-python wrapper (NOT the raw venv python): it strips PYTHONPATH
+# so tiktoken loads from the kb-agent venv, not Hermes' venv.
+VENV_PY = Path.home() / "kb_agent" / "bin" / "kb-python"
 
 if not DB.exists():
     sys.exit(0)
@@ -59,7 +64,6 @@ clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
 result = subprocess.run(
     [
         str(VENV_PY), str(VIZ), "--mode", "bubble", "--db", str(DB),
-        "--refresh-interval", str(REFRESH_INTERVAL),
     ],
     capture_output=True,
     text=True,
