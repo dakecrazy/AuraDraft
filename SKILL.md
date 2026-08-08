@@ -216,32 +216,33 @@ Card-based layout: per-cluster knowledge cards, token signature bars, similarity
 | `--mode` | `bubble` | `bubble` or `cards` |
 | `--output` | Auto (alongside DB) | Output HTML path |
 
-### Live refresh (auto, recommended)
+### Viewing & live refresh (zero infrastructure)
 
-To keep an open browser tab live, the simplest robust approach is a **one-shot cron job** that regenerates the HTML whenever the DB changes. Because the Hermes cron ticker runs inside the gateway process, the job **starts and stops with Hermes automatically** — no separate daemon to manage.
-
-Setup (one-time):
+Generate the bubble with auto-refresh, then open it in the Hermes preview pane:
 
 ```bash
-# 1. Install the one-shot refresh script into Hermes' scripts dir
-cp "$SKILL_DIR/scripts/kb_bubble_refresh.py" ~/.hermes/scripts/
-# 2. Register a 1-minute cron job (no-agent mode: silent when unchanged)
-hermes cron create '*/1 * * * *' --no-agent --script kb_bubble_refresh.py --name "KB Bubble Refresh"
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode bubble --refresh-interval 5
+# Then in Hermes: open_preview("file:///Users/<user>/.kb-agent/bubble.html")
 ```
 
-Note: `kb_bubble_refresh.py` hardcodes `~/kb_agent` paths (machine-specific). Edit the `DB`/`VIZ`/`VENV_PY`/`OUT` constants at the top if your skill lives elsewhere.
+The `--refresh-interval N` flag injects `<meta http-equiv="refresh" content="N">`.
+The Hermes preview pane (or any browser tab) auto-reloads every N seconds.
+When you classify new docs, just re-run `visualize.py` — the open pane refreshes
+automatically. **No server, no daemon, no port.**
 
-The script (`~/.hermes/scripts/kb_bubble_refresh.py`) compares the DB mtime (WAL-aware: checks `.db`/`-wal`/`-shm`) against a state file, regenerates `bubble.html` only on change, and injects `<meta http-equiv="refresh" content="60">` so the browser auto-reloads. Silent (no stdout) when unchanged → no delivery spam in no-agent mode.
+### Auto refresh (optional, paused by default)
 
-### Live refresh (manual, sub-minute)
-
-For interactive use with a faster cadence, run the watcher daemon:
+For always-on auto-regeneration, the cron module detects DB changes (WAL-aware:
+`.db`/`-wal`/`-shm`) and re-runs `visualize.py` automatically:
 
 ```bash
-"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/watch_visualize.py" --interval 5
+hermes cron resume ff4e8bab342d   # the "KB Bubble Refresh" job
 ```
 
-Polls the DB mtime every `--interval` seconds (WAL-aware), regenerates on change, injects meta-refresh. Ctrl-C to stop. Use this when you want sub-minute refresh; the cron job above is the recommended always-on mechanism.
+It regenerates `bubble.html` only on change and injects meta-refresh. Silent when
+unchanged → no delivery spam. Guarded so a `visualize.py` crash does not advance
+the state file (next tick retries). Uses the `bin/kb-python` wrapper so tiktoken
+loads from the kb-agent venv, not Hermes' venv (PYTHONPATH pollution fix).
 
 Works with any agent runtime (OpenClaw, Hermes, standalone Python). Generated HTML is self-contained — only external dependency is the D3.js CDN.
 

@@ -9,6 +9,7 @@ unchanged tick delivers nothing (no spam).
 Because the Hermes cron ticker runs inside the gateway process, this job
 starts and stops with Hermes automatically.
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,6 @@ DB = Path.home() / ".kb-agent" / "kb_index.db"
 STATE = Path.home() / ".kb-agent" / ".bubble_last_mtime"
 VIZ = Path.home() / "kb_agent" / "visualize.py"
 VENV_PY = Path.home() / "kb_agent" / ".venv" / "bin" / "python"
-OUT = Path.home() / ".kb-agent" / "bubble.html"
 REFRESH_INTERVAL = 60  # browser meta-refresh seconds (align with cron 1-min tick)
 
 if not DB.exists():
@@ -52,11 +52,18 @@ if STATE.exists():
 if last == sig:
     sys.exit(0)
 
-# DB changed → regenerate
+# DB changed → regenerate (visualize.py injects meta-refresh natively)
+# CRITICAL: strip PYTHONPATH so the subprocess loads tiktoken from the
+# kb-agent venv, not Hermes' venv (circular-import crash otherwise).
+clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
 result = subprocess.run(
-    [str(VENV_PY), str(VIZ), "--mode", "bubble", "--db", str(DB)],
+    [
+        str(VENV_PY), str(VIZ), "--mode", "bubble", "--db", str(DB),
+        "--refresh-interval", str(REFRESH_INTERVAL),
+    ],
     capture_output=True,
     text=True,
+    env=clean_env,
 )
 
 # Guard: if visualize.py crashed, do NOT advance state — next tick retries.
@@ -67,16 +74,5 @@ if result.returncode != 0:
         f"{result.stderr[-300:]}"
     )
     sys.exit(1)
-
-# Inject meta-refresh so an open browser tab auto-reloads
-if OUT.exists():
-    html = OUT.read_text("utf-8")
-    if 'http-equiv="refresh"' not in html:
-        html = html.replace(
-            '<meta charset="UTF-8">',
-            f'<meta charset="UTF-8">\n<meta http-equiv="refresh" content="{REFRESH_INTERVAL}">',
-            1,
-        )
-        OUT.write_text(html, "utf-8")
 
 STATE.write_text(str(sig))

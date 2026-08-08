@@ -855,6 +855,13 @@ Examples:
         default="bubble",
         help="Visualization mode (default: bubble)",
     )
+    parser.add_argument(
+        "--refresh-interval",
+        type=int,
+        default=0,
+        help="Inject <meta http-equiv=refresh> every N seconds for live "
+        "browser/preview auto-reload. 0 = no injection (default).",
+    )
     args = parser.parse_args()
 
     db_path = args.db
@@ -896,6 +903,17 @@ Examples:
         html = generate_cards_html(
             clusters, token_details, sim_matrix, doc_stats, timeline, stats
         )
+
+    # Post-process: inject meta-refresh for live auto-reload (safe string op,
+    # does not touch the fragile f-string template)
+    if args.refresh_interval and args.refresh_interval > 0:
+        if 'http-equiv="refresh"' not in html:
+            html = html.replace(
+                '<meta charset="UTF-8">',
+                f'<meta charset="UTF-8">\n'
+                f'<meta http-equiv="refresh" content="{args.refresh_interval}">',
+                1,
+            )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(html, encoding="utf-8")
