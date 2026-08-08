@@ -569,7 +569,7 @@ function layoutTokens(cluster) {{
     const cjk = t.text.match(/[\u4e00-\u9fff]/g);
     const cjkCount = cjk ? cjk.length : 0;
     const asciiCount = t.text.length - cjkCount;
-    t.fontSize = 10 + t.weight * 8;
+    t.fontSize = 11 + t.weight * 7;
     t.tw = cjkCount * t.fontSize + asciiCount * t.fontSize * 0.6 + 6;
     t.th = t.fontSize + 4;
   }});
@@ -581,21 +581,21 @@ function layoutTokens(cluster) {{
     if (i === 0) {{ t.localX = 0; t.localY = 0; return; }}
     const angle = i * goldenAngle;
     const radiusFactor = Math.sqrt(i / sorted.length);
-    const rr = innerR * 0.75 * radiusFactor;
+    const rr = innerR * 0.9 * radiusFactor;
     t.localX = rr * Math.cos(angle);
     t.localY = rr * Math.sin(angle);
   }});
 
   // Collision resolution
   const padding = 4;
-  for (let iter = 0; iter < 30; iter++) {{
+  for (let iter = 0; iter < 50; iter++) {{
     for (let i = 0; i < sorted.length; i++) {{
       for (let j = i + 1; j < sorted.length; j++) {{
         const a = sorted[i], b = sorted[j];
         const dx = b.localX - a.localX;
         const dy = b.localY - a.localY;
         const dist = Math.sqrt(dx*dx + dy*dy);
-        const minDist = (a.tw + b.tw) / 2 * 0.6 + padding;
+        const minDist = (a.tw + b.tw) / 2 * 0.95 + padding;
         if (dist < minDist && dist > 0.001) {{
           const push = (minDist - dist) / 2;
           const nx = dx / dist;
