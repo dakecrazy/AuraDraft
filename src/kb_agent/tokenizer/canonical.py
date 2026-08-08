@@ -30,8 +30,14 @@ class CanonicalTokenizer:
     # ── public API ────────────────────────────────────────────────
 
     def encode(self, text: str) -> list[int]:
-        """Encode text into canonical token IDs."""
-        return self._enc.encode(text)
+        """Encode text into canonical token IDs.
+
+        disallowed_special=() — treat tiktoken special tokens (e.g. the literal
+        ``<|endoftext|>`` that appears in ML/AI papers) as plain text. Without
+        this, any document containing such a literal crashes with a
+        "disallowed special token" error.
+        """
+        return self._enc.encode(text, disallowed_special=())
 
     def encode_truncated(self, text: str, max_tokens: int = 8000) -> list[int]:
         """Encode and truncate to *max_tokens* tokens."""
