@@ -216,15 +216,32 @@ Card-based layout: per-cluster knowledge cards, token signature bars, similarity
 | `--mode` | `bubble` | `bubble` or `cards` |
 | `--output` | Auto (alongside DB) | Output HTML path |
 
-### Live refresh (watch mode)
+### Live refresh (auto, recommended)
 
-`visualize.py` is a one-shot static generator — it does **not** auto-update when the DB changes. To keep an open browser tab live, run the watcher:
+To keep an open browser tab live, the simplest robust approach is a **one-shot cron job** that regenerates the HTML whenever the DB changes. Because the Hermes cron ticker runs inside the gateway process, the job **starts and stops with Hermes automatically** — no separate daemon to manage.
+
+Setup (one-time):
+
+```bash
+# 1. Install the one-shot refresh script into Hermes' scripts dir
+cp "$SKILL_DIR/scripts/kb_bubble_refresh.py" ~/.hermes/scripts/
+# 2. Register a 1-minute cron job (no-agent mode: silent when unchanged)
+hermes cron create '*/1 * * * *' --no-agent --script kb_bubble_refresh.py --name "KB Bubble Refresh"
+```
+
+Note: `kb_bubble_refresh.py` hardcodes `~/kb_agent` paths (machine-specific). Edit the `DB`/`VIZ`/`VENV_PY`/`OUT` constants at the top if your skill lives elsewhere.
+
+The script (`~/.hermes/scripts/kb_bubble_refresh.py`) compares the DB mtime (WAL-aware: checks `.db`/`-wal`/`-shm`) against a state file, regenerates `bubble.html` only on change, and injects `<meta http-equiv="refresh" content="60">` so the browser auto-reloads. Silent (no stdout) when unchanged → no delivery spam in no-agent mode.
+
+### Live refresh (manual, sub-minute)
+
+For interactive use with a faster cadence, run the watcher daemon:
 
 ```bash
 "$SKILL_DIR/bin/kb-python" "$SKILL_DIR/watch_visualize.py" --interval 5
 ```
 
-It polls the DB mtime, regenerates the HTML on change, and injects `<meta http-equiv="refresh">` so the browser reloads automatically. `--interval` sets both the poll and reload cadence (default 5s). Ctrl-C to stop.
+Polls the DB mtime every `--interval` seconds (WAL-aware), regenerates on change, injects meta-refresh. Ctrl-C to stop. Use this when you want sub-minute refresh; the cron job above is the recommended always-on mechanism.
 
 Works with any agent runtime (OpenClaw, Hermes, standalone Python). Generated HTML is self-contained — only external dependency is the D3.js CDN.
 

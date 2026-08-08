@@ -37,6 +37,21 @@ def regenerate(db_path: Path, mode: str, interval: int) -> None:
         out.write_text(html, "utf-8")
 
 
+def _db_signature(db_path: Path) -> float:
+    """Latest mtime across DB + WAL + SHM files.
+
+    SQLite WAL mode writes to the -wal file first; the main .db mtime only
+    updates on checkpoint. Checking all three catches real ingest ops that
+    never checkpoint.
+    """
+    candidates = [
+        db_path,
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    ]
+    return max((f.stat().st_mtime for f in candidates if f.exists()), default=0.0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live-refresh kb-agent visualization")
     parser.add_argument("--db", default=str(Path.home() / ".kb-agent" / "kb_index.db"))
@@ -49,16 +64,16 @@ def main() -> None:
         print(f"Database not found: {db_path}", file=sys.stderr)
         sys.exit(1)
 
-    last_mtime = db_path.stat().st_mtime
+    last_sig = _db_signature(db_path)
     regenerate(db_path, args.mode, args.interval)
     print(f"👁  Watching {db_path} every {args.interval}s — Ctrl-C to stop.")
 
     try:
         while True:
             time.sleep(args.interval)
-            mtime = db_path.stat().st_mtime
-            if mtime != last_mtime:
-                last_mtime = mtime
+            sig = _db_signature(db_path)
+            if sig != last_sig:
+                last_sig = sig
                 regenerate(db_path, args.mode, args.interval)
                 print(f"  ↻ Regenerated at {time.strftime('%H:%M:%S')}")
     except KeyboardInterrupt:
