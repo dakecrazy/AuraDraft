@@ -59,8 +59,15 @@ def main() -> None:
         sys.exit(1)
 
     root = Path(sys.argv[1]).resolve()
+    # Parse --ext robustly (argparse-free but bounds-checked): default covers
+    # the common doc types; a trailing --ext with no value falls back to default.
+    ext_arg = ""
+    if "--ext" in sys.argv:
+        i = sys.argv.index("--ext")
+        if i + 1 < len(sys.argv):
+            ext_arg = sys.argv[i + 1]
     exts = {("." + e.strip().lstrip(".")).lower() for e in
-            (sys.argv[sys.argv.index("--ext") + 1] if "--ext" in sys.argv else "pdf,md,txt,docx,py").split(",")}
+            (ext_arg or "pdf,md,txt,docx,py").split(",")}
 
     if not root.is_dir():
         print(json.dumps({"error": f"not a directory: {root}"}))
