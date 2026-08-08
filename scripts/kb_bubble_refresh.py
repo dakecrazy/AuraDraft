@@ -53,11 +53,20 @@ if last == sig:
     sys.exit(0)
 
 # DB changed → regenerate
-subprocess.run(
+result = subprocess.run(
     [str(VENV_PY), str(VIZ), "--mode", "bubble", "--db", str(DB)],
     capture_output=True,
     text=True,
 )
+
+# Guard: if visualize.py crashed, do NOT advance state — next tick retries.
+# Print to stdout so no-agent cron delivers the error (visible in cron history).
+if result.returncode != 0:
+    print(
+        f"⚠ bubble regeneration failed (exit {result.returncode}): "
+        f"{result.stderr[-300:]}"
+    )
+    sys.exit(1)
 
 # Inject meta-refresh so an open browser tab auto-reloads
 if OUT.exists():
