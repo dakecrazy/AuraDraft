@@ -904,16 +904,23 @@ Examples:
             clusters, token_details, sim_matrix, doc_stats, timeline, stats
         )
 
-    # Post-process: inject meta-refresh for live auto-reload (safe string op,
-    # does not touch the fragile f-string template)
+    # NOTE: live auto-reload is NOT injected here. Under file:// the browser
+    # blocks fetch() (CORS) and document.lastModified is cached at page-load
+    # (does not update dynamically), so no client-side JS can detect file
+    # changes. Live refresh is handled externally: a Hermes --monitor-script
+    # watchdog detects DB changes and an agent re-runs this script + calls
+    # open_preview to reload the pane. --refresh-interval is accepted for
+    # backward compatibility but is a no-op.
     if args.refresh_interval and args.refresh_interval > 0:
-        if 'http-equiv="refresh"' not in html:
-            html = html.replace(
-                '<meta charset="UTF-8">',
-                f'<meta charset="UTF-8">\n'
-                f'<meta http-equiv="refresh" content="{args.refresh_interval}">',
-                1,
-            )
+        pass
+
+    # Replace CDN D3 with a local relative path. Under file:// the webview
+    # CSP blocks external scripts, so the SVG never renders (blank/error).
+    # d3.v7.min.js must sit next to the output HTML.
+    html = html.replace(
+        'src="https://d3js.org/d3.v7.min.js"',
+        'src="d3.v7.min.js"',
+    )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(html, encoding="utf-8")
