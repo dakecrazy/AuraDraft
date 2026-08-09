@@ -859,8 +859,8 @@ Examples:
         "--refresh-interval",
         type=int,
         default=0,
-        help="Inject <meta http-equiv=refresh> every N seconds for live "
-        "browser/preview auto-reload. 0 = no injection (default).",
+        help="Deprecated no-op. Electron auto-reloads file:// on change, so no "
+        "client-side refresh is needed. Kept for CLI backward compatibility.",
     )
     args = parser.parse_args()
 
@@ -907,12 +907,10 @@ Examples:
     # NOTE: live auto-reload is NOT injected here. Under file:// the browser
     # blocks fetch() (CORS) and document.lastModified is cached at page-load
     # (does not update dynamically), so no client-side JS can detect file
-    # changes. Live refresh is handled externally: a Hermes --monitor-script
-    # watchdog detects DB changes and an agent re-runs this script + calls
-    # open_preview to reload the pane. --refresh-interval is accepted for
-    # backward compatibility but is a no-op.
-    if args.refresh_interval and args.refresh_interval > 0:
-        pass
+    # changes. Live refresh is handled externally: the Electron webview
+    # auto-reloads a file:// page when the file changes on disk, so re-running
+    # this script is enough. --refresh-interval is accepted for backward
+    # compatibility but is a no-op.
 
     # Replace CDN D3 with a local relative path. Under file:// the webview
     # CSP blocks external scripts, so the SVG never renders (blank/error).
