@@ -181,6 +181,24 @@ PY
 
 The `"$SKILL_DIR/bin/kb-python" - "$SKILL_DIR"` form passes the skill dir as `sys.argv[1]`, so the script resolves `src/` relative to its own location — no hardcoded paths anywhere. The `kb-python` wrapper strips `PYTHONPATH` pollution, so the batch script's `import tiktoken` loads the venv's own native extension.
 
+### Batch ingest from a directory (one-by-one, cache-safe)
+
+For a whole directory of documents, use the ready-made script — it prevents context/cache explosion by processing strictly one-at-a-time and emitting a compact JSON summary for the agent's routing decisions:
+
+```bash
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/scripts/kb_batch_ingest.py" <dir> [--ext pdf,md,txt,docx,py]
+```
+
+What it does (mechanical layer only — no LLM calls):
+- **MD5 dedup** — identical files (e.g. 3 copies of the same PDF) ingest once
+- **Path dedup** — skips docs already in the DB (by `file_path`)
+- **Sequential ingest + prefilter** — one doc at a time, never loads the whole dir into memory/context
+- **Structured JSON output** — `{files, skipped_dup, skipped_existing, ingested: [{doc_id, file, total_tokens, chunk_count, candidates}]}`
+
+The agent then does L1 routing per doc (read candidates + cards → `assign`/`create`), then `archive`. This is the recommended flow for 10+ docs from a folder — it keeps each routing decision in a bounded context turn instead of dumping everything at once.
+
+> **Pitfall:** `kb_ingest` calls `tiktoken.encode` with `disallowed_special=()` (fixed in `canonical.py`), so literal `<|endoftext|>` text in ML/AI papers no longer crashes tokenization.
+
 ## Visualization
 
 `visualize.py` generates standalone HTML pages from the knowledge base DB. No server required — any agent or human can open the HTML in a browser.
