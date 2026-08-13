@@ -1,7 +1,7 @@
 [project]
-name = "kb-agent"
-version = "0.1.0"
-description = "Token-based knowledge base with MoE-inspired routing"
+name = "auradraft"
+version = "2.0.0"
+description = "AuraDraft — token-based knowledge base with MoE-inspired routing and a shared inspiration field (Aura)"
 requires-python = ">=3.10"
 dependencies = [
     "tiktoken>=0.7",

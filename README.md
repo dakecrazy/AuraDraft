@@ -1,338 +1,265 @@
-# kb-agent
+# AuraDraft
 
-**Token-based knowledge base with MoE-inspired routing.**
+<p align="center">
+  <img src="docs/auradraft-hero.webp" alt="AuraDraft — Shared Inspiration Field" width="600">
+</p>
 
-kb-agent 是一个知识库基础设施层（零 LLM 调用），暴露 8 个原子工具给 Hermes agent 编排。Hermes 负责"理解"环节（读文档、做分类决策、写 knowledge_card、发现跨域联系），kb-agent 负责"存储和检索"环节（tokenize、索引、聚类、搜索、归档）。
+<p align="center">
+  <b>Knowledge that breathes.</b><br>
+  A knowledge base where clusters are planets of meaning, surrounded by a shared inspiration field — the Aura.
+</p>
 
-## 架构概览
+---
+
+## What is AuraDraft?
+
+AuraDraft is a token-based knowledge base engine with a two-level architecture:
+
+- **Planets (clusters):** Stable cores of meaning. Each cluster is a self-organizing group of documents, represented by an L2-normalized TF-IDF centroid in token space.
+- **Aura (shared inspiration field):** A continuous density field that permeates the space between clusters. It is densest at the *boundaries* between clusters — the places where cross-domain inspiration is most likely to occur.
+
+The key insight: **inspiration doesn't live inside a cluster. It lives in the gaps between them.**
+
+A token that belongs equally to "convolutional architectures" and "trading signals" has high Aura intensity — it sits in the interstitial zone where new ideas form. AuraDraft makes these zones visible.
+
+## Architecture
+
+### Two layers of meaning
 
 ```
-Hermes（推理层 — agent）
-  │
-  ├── kb_ingest(file)        → doc_id          ← 索引文档
-  ├── kb_prefilter(doc_id)   → [候选簇]         ← 统计预筛
-  ├── kb_get_cards(cids)     → {card_text}      ← 读知识档案
-  │
-  ├── [Hermes 决策：归入现有簇 or 创建新簇]
-  │
-  ├── kb_assign(doc_id, cid)                    ← 归入现有簇
-  │   └── kb_archive(file, label)               ← 物理归档
-  │
-  ├── kb_create(label, card, doc_id) → cid      ← 创建新簇
-  │   └── kb_archive(file, label)               ← 物理归档
-  │
-  ├── kb_update_card(cid, card_text)            ← 更新知识档案
-  ├── kb_search(query)        → [搜索结果]       ← BM25 检索
-  └── kb_archive(file, label) → archived_path   ← 物理归档
+                    ┌─────────────────────────────┐
+                    │      Shared Aura Field        │
+                    │   (inspiration density)       │
+                    │                               │
+         ┌───────╔╧════════╗────────┐               │
+         │       ║ Planet A ║        │  ← boundary  │
+         │       ║ (core)   ║   ╔════╧════╗         │
+         │       ╚══════╤═══╝   ║ Planet B ║         │
+         │              │       ║ (core)   ║         │
+         │              │       ╚══════╤═══╝         │
+         │              │              │              │
+                    └───┴──────────────┴──────────────┘
+
+                    Aura is densest at boundaries
 ```
 
-### 为什么是 Token 索引？
+**Planet (cluster core):** What you already know. Stable. Document TF-IDF centroids in token space.
 
-传统知识库用词级倒排索引（需要 jieba 分词）或向量索引（需要 embedding 模型）。本方案直接用 LLM 的 tokenizer（o200k_base）作为索引单元：
+**Aura (inspiration field):** What you *might* discover. Fluid. Concentrated at inter-cluster boundaries where entropy of belonging is highest.
 
-- **天然子词粒度**：不需要额外分词器
-- **与 LLM 对齐**：索引和推理在同一个 token 空间
-- **整数 ID 查找**：比字符串匹配快一个数量级
-- **Token 预算可控**：天然知道每个 chunk 多少 token
+### Three-layer token index
 
-### 为什么是 MoE 路由？
+All documents are tokenized using tiktoken's `o200k_base` (GPT-4o's tokenizer), chunked (256 tokens, 32 overlap), and indexed in three layers:
 
-当知识库有 10000 个簇时，不可能把所有 knowledge_card 塞进 LLM 上下文。MoE 分层路由解决这个问题：
+| Layer | What | Purpose |
+|-------|------|---------|
+| Layer 1 | Token inverted index | BM25 scoring (K1=1.2, B=0.75) |
+| Layer 2 | Bigram phrase index | Deterministic phrase matching |
+| Layer 3 | Packed chunk tokens | Full-text reconstruction from binary blobs |
 
-- **L0（统计预筛）**：token 频率签名 → 余弦相似度 → 选出 Top-K 候选簇（免费，毫秒级）
-- **L1（LLM 深度分类）**：只把 Top-K 的 knowledge_card 塞进 prompt → LLM 做理解、推理、归类
-- **效果**：无限容量 × 有限计算，和 MoE 模型用 2/64 激活率跑万亿参数是同一个原理
+### MoE routing (two-level classification)
 
-### Tokenizer 兼容策略
+- **L0 (free, milliseconds):** Token frequency signature → cosine similarity against cluster centroids → Top-K candidates
+- **L1 (LLM, tokens):** Agent reads Top-K knowledge cards → semantic judgment → assign or create
+- **Scales to 10,000+ clusters** with bounded compute
 
-索引层用 o200k_base（GPT-4o 的 tokenizer，200K 词表，中文覆盖好，完全开源）。推理层把文本原样传给任何 LLM API。两层之间永远用"文本"做桥梁。换模型时不需要重建索引。
+### The Aura field
 
-## 8 个原子工具
+The inspiration intensity at any point `p` in the space is:
 
-所有工具通过 CLI 调用：`"$SKILL_DIR/bin/kb" <cmd> <args>`
+```
+H(p) = concentration(p) × entropy(p)
+```
 
-| 工具 | 用途 | 是否调 LLM |
-|------|------|:---:|
-| `kb_ingest` | 索引文档（tokenize + chunk + 倒排索引） | ❌ |
-| `kb_prefilter` | 统计预筛（token 签名 → 余弦相似度 → Top-K 候选簇） | ❌ |
-| `kb_get_cards` | 读知识档案 | ❌ |
-| `kb_assign` | 归入现有簇（更新质心 + 知识档案） | ❌ |
-| `kb_create` | 创建新簇（label + card + 第一篇文档） | ❌ |
-| `kb_update_card` | 更新知识档案 | ❌ |
-| `kb_search` | BM25 混合检索（exact × 0.6 + phrase × 0.4） | ❌ |
-| `kb_archive` | 物理归档到 `knowledge_base/{label}/` | ❌ |
+Where:
+- `concentration(p) = Σ exp(-||p - c_i||² / 2σ²)`  — total affinity from all clusters
+- `entropy(p) = -Σ q_i(p) log q_i(p)`  — Shannon entropy of the belonging distribution
 
-### 1. kb_ingest — 索引文档
+**Why this works:**
+
+| Position | Concentration | Entropy | H(p) | Meaning |
+|----------|--------------|---------|------|---------|
+| Cluster center | High | Low | Medium | Already known — low surprise |
+| **Boundary** | **High** | **High** | **Maximum** | **Cross-domain inspiration zone** |
+| Far empty space | Low | Medium | Low | No information to spark from |
+
+Tokens are weighted by their cross-cluster entropy: a token appearing in multiple cluster centroids has high Aura weight and drifts toward boundaries. Tokens in a single cluster have zero Aura weight and sink into their planet.
+
+```
+token_aura_weight(t) = total_strength(t) × cross_cluster_entropy(t)
+```
+
+## 8 Atomic Tools
+
+All tools via CLI: `"$SKILL_DIR/bin/kb" <cmd> <args>`
+
+| Tool | Purpose | LLM call |
+|------|---------|:--------:|
+| `kb_ingest` | Index a document (tokenize + chunk + 3-layer index) | ❌ |
+| `kb_prefilter` | Statistical screening (token signature → cosine similarity → Top-K) | ❌ |
+| `kb_get_cards` | Read knowledge cards for clusters | ❌ |
+| `kb_assign` | Assign document to existing cluster (updates centroid + card) | ❌ |
+| `kb_create` | Create new cluster (label + card + first document) | ❌ |
+| `kb_update_card` | Update a cluster's knowledge card | ❌ |
+| `kb_search` | BM25 hybrid retrieval (0.6×exact + 0.4×phrase) | ❌ |
+| `kb_archive` | Physical archiving to `knowledge_base/{label}/` | ❌ |
+
+### Standard workflow
 
 ```bash
-"$SKILL_DIR/bin/kb" ingest <file> [doc_id] [category]
-```
+# 1. Index
+"$SKILL_DIR/bin/kb" ingest paper.pdf doc_001
 
-将文档 tokenize、切 chunk、建三层索引（倒排 + bigram + chunk）。**不分类、不归档。** 返回 `doc_id`。
-
-### 2. kb_prefilter — 统计预筛
-
-```bash
-"$SKILL_DIR/bin/kb" prefilter <doc_id>
-```
-
-从 `doc_signatures` 表读取文档的 token 签名，和所有簇质心算余弦相似度，返回 Top-K 候选簇。当簇数 ≤ top_k 时返回全部。
-
-```json
-[{"cluster_id": "...", "label": "深度学习", "similarity": 0.1379, "doc_count": 1}]
-```
-
-### 3. kb_get_cards — 读知识档案
-
-```bash
-"$SKILL_DIR/bin/kb" get-cards <cid> [cid ...]
-```
-
-### 4. kb_assign — 归入现有簇
-
-```bash
-cat card.txt | "$SKILL_DIR/bin/kb" assign <doc_id> <cluster_id>
-```
-
-card_text 从 stdin 读取（支持多行中文）。自动更新 token doc-frequency。
-
-### 5. kb_create — 创建新簇
-
-```bash
-cat card.txt | "$SKILL_DIR/bin/kb" create <label> <doc_id>
-```
-
-### 6. kb_update_card — 更新知识档案
-
-```bash
-echo "新的知识档案内容" | "$SKILL_DIR/bin/kb" update-card <cluster_id>
-```
-
-### 7. kb_search — BM25 检索
-
-```bash
-"$SKILL_DIR/bin/kb" search <query> [top_k] [mode]
-```
-
-模式：`exact`（倒排）、`phrase`（bigram）、`hybrid`（默认，0.6+0.4）。
-
-### 8. kb_archive — 物理归档
-
-```bash
-"$SKILL_DIR/bin/kb" archive <file> <label> [doc_id]
-```
-
-复制文件到 `knowledge_base/{label}/`。自动更新索引中的 `file_path`。
-
-## 编排工作流
-
-### 标准流程（每篇文档）
-
-```bash
-# 1. 索引
-"$SKILL_DIR/bin/kb" ingest paper.txt doc_001
-
-# 2. 预筛
+# 2. Prefilter — find candidate clusters
 "$SKILL_DIR/bin/kb" prefilter doc_001
-# → []（第一篇文档）
 
-# 3. 创建簇（Hermes 生成 label + card）
-cat <<'CARD' | "$SKILL_DIR/bin/kb" create "领域名" doc_001
-领域：领域名
-核心知识：...
-CARD
+# 3. Agent reads cards → decides: assign or create
+cat card.txt | "$SKILL_DIR/bin/kb" assign doc_001 <cluster_id>
+# or
+cat card.txt | "$SKILL_DIR/bin/kb" create "New Domain" doc_001
 
-# 4. 归档
-"$SKILL_DIR/bin/kb" archive paper.txt "领域名" doc_001
+# 4. Archive
+"$SKILL_DIR/bin/kb" archive paper.pdf "New Domain" doc_001
 ```
 
-### 查询流程
+### Query
 
 ```bash
-"$SKILL_DIR/bin/kb" search "注意力机制的计算复杂度"
-# → [dl_001: 15.81, dl_002: 1.44, legal_001: 0.24]
+"$SKILL_DIR/bin/kb" search "attention mechanism complexity"
+# → [{doc_id: "dl_001", score: 15.81}, ...]
 ```
 
-### 批量摄入（100+ 篇文档）
+## Installation
 
-在单个进程中运行 Python 脚本，避免每次加载 tiktoken（每次 CLI 冷启动约 2s）。用 `kb-python` 包装器运行，自动剥离 PYTHONPATH 污染：
+> **`$SKILL_DIR`** = the directory containing this README. No hardcoded paths anywhere.
 
 ```bash
-"$SKILL_DIR/bin/kb-python" - "$SKILL_DIR" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1] + "/src")
-from kb_agent.tools import init_kb, kb_ingest, kb_prefilter, kb_assign, kb_create, kb_archive
-from kb_agent.document.loader import iter_documents
-
-session = init_kb("kb_index.db")
-session.connect()
-
-for f in iter_documents("./docs/"):
-    r = kb_ingest(session, str(f))
-    doc_id = r["doc_id"]
-    candidates = kb_prefilter(session, doc_id)
-    if candidates:
-        cid = candidates[0]["cluster_id"]
-        kb_assign(session, doc_id, cid)
-    else:
-        kb_create(session, "新领域", "初始知识档案", doc_id)
-    kb_archive(session, str(f), "新领域")
-
-session.close()
-PY
+bash setup.sh
 ```
 
-## 安装
-
-> **`$SKILL_DIR`** = 本 skill 所在目录（含 `SKILL.md` 的目录）。任何 agent 运行时（OpenClaw / Hermes / 独立）都知道自己的 skills 路径，替换成实际路径即可。全文档无硬编码路径。
+Creates `$SKILL_DIR/.venv`, installs dependencies (tiktoken, numpy, optional pymupdf for PDF). Auto-detects PyPI mirrors and proxy. Python ≥ 3.10 required (override with `KB_AGENT_PYTHON`).
 
 ```bash
-bash setup.sh   # 自定位：创建 .venv、安装依赖、打印 CLI 命令
+"$SKILL_DIR/bin/kb" <cmd> <args>      # CLI wrapper (strips PYTHONPATH pollution)
+"$SKILL_DIR/bin/kb-python" <script>   # Python wrapper for batch scripts
 ```
 
-`setup.sh` 会创建 `$SKILL_DIR/.venv` 并以 editable 方式安装，自动探测 Python ≥3.10（可用 `KB_AGENT_PYTHON` 指定解释器），并清除宿主环境的 `PYTHONPATH` 污染。之后用包装器调用：
+### Hermes Agent registration
 
 ```bash
-"$SKILL_DIR/bin/kb" <cmd> <args>   # 自动剥离 PYTHONPATH，任何运行时都可用
+ln -s /path/to/auradraft ~/.hermes/skills/data-science/kb-agent
 ```
 
-依赖：`tiktoken`、`numpy`（自动安装）。
+Then load in a Hermes conversation: the skill auto-registers its 8 tools.
 
-### Hermes Skill 注册
+## Visualization
+
+### Bubble view (interactive D3 force-directed map)
 
 ```bash
-ln -s /path/to/kb-agent ~/.hermes/skills/data-science/kb-agent
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode bubble
+# → ~/.kb-agent/bubble.html
 ```
 
-然后在 Hermes 对话中 `/skill kb-agent` 加载。
+Each cluster is a draggable bubble. Bubble size = document count. Top-20 tokens float inside. Inter-cluster links show cosine similarity.
 
-## 数据存储
+### Cards view (static summary)
 
-| 数据 | 位置 | 说明 |
-|------|------|------|
-| 索引 + 簇 | `kb_index.db` | SQLite，WAL 模式 |
-| 物理文件 | `knowledge_base/{label}/` | 归档后的文档副本 |
-| Token 缓存 | `.cache/tiktoken/` | BPE 文件缓存 |
-
-## 真实编排演示
-
-以下是一次完整的 Hermes 编排过程（3 篇文档，2 个领域）：
-
-```
-# 1. 索引 dl_001（注意力机制综述）
-$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/deep_learning_attention.txt dl_001
-→ doc_id=dl_001, tokens=464
-
-# 2. 预筛 → 空（第一篇文档）
-$ "$SKILL_DIR/bin/kb" prefilter dl_001
-→ []
-
-# 3. Hermes 读文档 → 创建「深度学习」簇
-$ cat <<CARD | "$SKILL_DIR/bin/kb" create "深度学习" dl_001
-领域：深度学习 - 注意力机制
-【核心知识】自注意力 Q/K/V、多头注意力、复杂度 O(n²)
-【知识演进】2017 Transformer → Flash Attention
-CARD
-→ cluster_id=76bf7f85
-
-# 4. 索引 legal_001（买卖合同）
-$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/legal_contract.txt legal_001
-
-# 5. 预筛 → 深度学习簇（相似度 0.0105，明显不匹配）
-$ "$SKILL_DIR/bin/kb" prefilter legal_001
-→ [{cluster_id: 76bf7f85, similarity: 0.0105}]
-
-# 6. Hermes 判断 → 创建「法律合同」簇
-$ cat <<CARD | "$SKILL_DIR/bin/kb" create "法律合同" legal_001
-领域：法律合同 - 买卖合同
-CARD
-→ cluster_id=73ba330e
-
-# 7. 索引 dl_002（训练优化技术）
-$ "$SKILL_DIR/bin/kb" ingest tests/fixtures/sample_docs/deep_learning_training.txt dl_002
-
-# 8. 预筛 → 深度学习 0.1379，法律合同 0.0119
-$ "$SKILL_DIR/bin/kb" prefilter dl_002
-→ [{深度学习: 0.1379}, {法律合同: 0.0119}]
-
-# 9. Hermes 判断 → 归入深度学习簇，更新知识档案
-$ cat <<CARD | "$SKILL_DIR/bin/kb" assign dl_002 76bf7f85
-领域：深度学习
-【核心知识】注意力机制 + 训练优化（学习率调度、混合精度、AdamW）
-CARD
-→ doc_count=2, card_updated=true
-
-# 10. 搜索验证
-$ "$SKILL_DIR/bin/kb" search "注意力机制的计算复杂度"
-→ dl_001: 15.81, dl_002: 1.44, legal_001: 0.24
+```bash
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode cards
+# → ~/.kb-agent/visualization.html
 ```
 
-## 关键设计决策
+### Live refresh (zero infrastructure)
 
-### 为什么用 CLI 桥接而不是 Python import？
+```bash
+"$SKILL_DIR/bin/kb-python" "$SKILL_DIR/visualize.py" --mode bubble --refresh-interval 5
+# Then open in Hermes preview pane or any browser
+```
 
-Hermes skill 的范式是工具调用，每个工具是一个独立的 `terminal()` 命令。CLI 调用让 Hermes 不需要管理 Python session 生命周期。对于批量场景，提供 Python 脚本模板在单个 `terminal()` 中执行。
+## Data storage
 
-### 为什么 signature 存 DB 而不是返回给调用方？
+| Data | Location | Notes |
+|------|----------|-------|
+| Index + clusters | `kb_index.db` (default `~/.kb-agent/`) | SQLite, WAL mode |
+| Archived files | `knowledge_base/{label}/` | Copies, originals preserved |
+| Token cache | `.cache/tiktoken/` | BPE file cache |
 
-Signature 是 128 个 token_id→weight 对，约 2KB。如果每篇文档都返回给 Hermes，100 篇文档就是 200KB 上下文浪费。存 DB 后调用方只传 `doc_id`（12 字节），signature 在 `kb_prefilter` 内部读取。
+## Design decisions
 
-### 为什么 knowledge_card 存 SQLite？
+### Why token indexing instead of word-level or vector?
 
-跨会话持久化。Hermes 的上下文是会话级的，重启后丢失。SQLite 中的 knowledge_card 在重启后仍然可用，且和簇绑定。
+- **No separate tokenizer needed** — sub-word granularity is native
+- **Aligned with LLM** — index and inference operate in the same token space
+- **Integer ID lookups** — an order of magnitude faster than string matching
+- **Token budget awareness** — chunks know their token cost
 
-## 项目结构
+### Why MoE routing?
+
+With 10,000 clusters, you can't fit all knowledge cards in an LLM context. MoE solves this:
+
+- **L0 (statistical):** Token frequency → cosine similarity → Top-K candidates (free, ms)
+- **L1 (LLM):** Only Top-K cards enter the prompt → agent makes the final call
+- **Same principle as sparse MoE models:** unlimited capacity × bounded compute
+
+### Why the Aura field?
+
+Traditional knowledge bases optimize for *finding what you already know*. AuraDraft optimizes for *discovering what you don't know you know*.
+
+The Aura field surfaces the interstitial zones — the boundaries between knowledge clusters where:
+- A concept from domain A illuminates domain B
+- Two fields share a hidden vocabulary
+- The most generative collisions happen
+
+It's not retrieval. It's **inspiration made visible.**
+
+## Project structure
 
 ```
-kb-agent/
+auradraft/
 ├── src/kb_agent/
-│   ├── tokenizer/canonical.py   # 规范 Tokenizer（o200k_base）
-│   ├── document/loader.py       # 文档加载器
-│   ├── index/engine.py          # Token 索引引擎（BM25）
+│   ├── tokenizer/canonical.py   # Canonical tokenizer (o200k_base)
+│   ├── document/loader.py       # Document loader (text, PDF, markdown)
+│   ├── index/engine.py          # Token index engine (BM25, 3-layer)
 │   ├── cluster/
-│   │   ├── model.py             # KnowledgeCluster 数据模型
-│   │   └── manager.py           # TokenClusterEngine（统计聚类）
+│   │   ├── model.py             # KnowledgeCluster data model
+│   │   └── manager.py           # TokenClusterEngine (TF-IDF clustering)
+│   ├── router/moe_router.py     # MoE router (L0 prefilter + L1 LLM)
 │   ├── storage/
-│   │   ├── db.py                # SQLite 连接管理 + schema
-│   │   └── cluster_store.py     # 簇持久化
-│   ├── tools/
-│   │   ├── session.py           # KnowledgeBaseSession
-│   │   ├── ops.py               # 8 个原子工具
-│   │   └── cli.py               # CLI 入口（推荐使用）
-│   ├── pipeline/                # [DEPRECATED] 旧管线代码
-│   ├── llm/                     # [DEPRECATED] 旧 LLM 抽象
-│   └── cli/                     # [DEPRECATED] 旧 CLI
+│   │   ├── db.py                # SQLite connection + schema
+│   │   └── cluster_store.py     # Cluster persistence
+│   └── tools/
+│       ├── session.py           # KnowledgeBaseSession
+│       ├── ops.py               # 8 atomic tools
+│       └── cli.py               # CLI entry point
+├── visualize.py                 # D3 bubble/cards visualization
+├── scripts/                     # Batch ingest, auto-refresh
+├── docs/                        # Hero image, assets
 ├── tests/
-│   ├── test_index_engine.py     # M1: 索引 + BM25
-│   ├── test_cluster_engine.py   # M2: 统计聚类
-│   ├── test_m3_pipeline.py      # M3: 管线
-│   ├── test_m4_query.py         # M4: 查询
-│   └── test_tools.py            # 8 工具编排测试
-├── SKILL.md                     # Hermes skill 注册文件
+├── SKILL.md                     # Hermes skill manifest
 ├── pyproject.toml
 └── README.md
 ```
 
-## 里程碑
+## Milestones
 
-| 里程碑 | 功能 | 状态 |
-|--------|------|------|
-| M1 | Token 索引引擎（BM25 搜索 + 持久化） | ✅ |
-| M2 | 统计聚类（降噪 + TF 签名 + 余弦相似度） | ✅ |
-| M3 | LLM 深度分类（knowledge_card + MoE 路由） | ✅ |
-| M4 | 查询管线（BM25 + LLM 合成 + 簇导航） | ✅ |
-| M5 | CLI + 物理归档 + 批量摄入 | ✅ |
-| Phase 1 | 8 原子工具 + Hermes 编排 | ✅ |
+| Milestone | Features | Status |
+|-----------|----------|--------|
+| M1 | Token index engine (BM25 + persistence) | ✅ |
+| M2 | Statistical clustering (noise filter + TF-IDF + cosine) | ✅ |
+| M3 | MoE routing (knowledge cards + L0/L1) | ✅ |
+| M4 | Query pipeline (BM25 + cluster navigation) | ✅ |
+| M5 | CLI + physical archiving + batch ingest | ✅ |
+| **v2.0** | **Aura field: shared inspiration density model** | 🔬 Concept |
 
 ## Pitfalls
 
-- **CLI 每次调用加载 tiktoken ~2 秒** — 批量摄入用 Python 脚本模板
-- **`kb_ingest` 后必须 `kb_assign` 或 `kb_create`** — 否则文档只有索引没有归属
-- **`kb_archive` 复制文件，不移动** — 源文件保留
-- **`kb_prefilter` 在簇数 ≤ top_k 时返回全部** — 不设相似度门槛
-- **`kb_update_card` / `kb_assign` / `kb_create` 从 stdin 读取 card_text** — 用 heredoc 或管道
-- **SQLite 文件锁** — 不要同时运行多个 CLI 命令操作同一个 DB
+- **CLI cold start ~2s** — tiktoken BPE loading. Use Python scripts for batch.
+- **`kb_ingest` requires `kb_assign` or `kb_create`** — otherwise document has index but no cluster, invisible to search.
+- **`kb_archive` copies, doesn't move** — source files are preserved.
+- **SQLite file locks** — don't run multiple CLI commands on the same DB concurrently.
+- **`kb_prefilter` returns all clusters when count ≤ top_k** — no similarity threshold.
 
-## 许可证
+## License
 
 MIT
