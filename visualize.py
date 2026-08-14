@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""kb-agent cluster visualization — generates standalone HTML pages.
+"""AuraDraft visualization — generates standalone HTML pages.
 
 Usage:
     python visualize.py [--db PATH] [--output PATH] [--mode MODE]
 
 Modes:
     cards   — Static card-based layout with token bars, similarity matrix, timeline
-    bubble  — Interactive D3 force-directed bubble map (default)
+    bubble  — Interactive D3 force-directed bubble map with Aura field (default)
 
 Defaults:
     --db      ~/.kb-agent/kb_index.db
@@ -316,8 +316,10 @@ CLUSTER_COLORS = [
 ]
 
 
-def build_bubble_data(clusters, token_details, sim_matrix, stats):
-    """Build JSON data for the bubble template."""
+def build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=None):
+    """Build JSON data for the bubble template (planets + Aura layer)."""
+    from kb_agent.aura import compute_aura_tokens, aura_summary
+
     nodes = []
     sim_threshold = 0.05  # only draw links above this similarity
 
@@ -362,8 +364,26 @@ def build_bubble_data(clusters, token_details, sim_matrix, stats):
             "associations": associations,
         })
 
+    # ── Aura layer: cross-boundary inspiration tokens ──
+    # Use full centroids (not just top-20): cross-boundary signal often
+    # lives below the top-K tokens of each cluster.
+    centroids = [c.get("centroid", {}) for c in clusters]
+    if tokenizer is not None:
+        aura_tokens = compute_aura_tokens(
+            clusters,
+            centroids=centroids,
+            decode=lambda tid: tokenizer.decode([int(tid)]),
+            top_k=40,
+        )
+    else:
+        aura_tokens = compute_aura_tokens(clusters, token_details, top_k=40)
+    summary = aura_summary(aura_tokens, clusters)
+    print(f"   Aura: {summary['aura_tokens']} inspiration tokens, "
+          f"{len(summary['bridged_pairs'])} bridged cluster pairs")
+
     return {
         "nodes": nodes,
+        "auraTokens": aura_tokens,
         "stats": stats,
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dbPath": get_db_path(),
@@ -479,6 +499,7 @@ svg {{ width: 100%; height: 100%; display: block; }}
 <div id="canvas-container">
   <div id="controls">
     <input id="search-input" type="text" placeholder="搜索 token 或概念..." />
+    <button class="btn" id="btn-aura" onclick="toggleAura()">Aura 场</button>
     <button class="btn" id="btn-reset" onclick="resetView()">重置视图</button>
   </div>
   <div id="stats-overlay"></div>
@@ -496,6 +517,7 @@ svg {{ width: 100%; height: 100%; display: block; }}
     <div class="item"><div class="dot" style="background:rgba(100,180,255,0.5)"></div>Cluster</div>
     <div class="item"><div class="dot" style="background:rgba(100,255,180,0.5)"></div>Token</div>
     <div class="item"><div class="dot" style="background:rgba(255,180,100,0.5)"></div>关联线</div>
+    <div class="item"><div class="dot" style="background:rgba(120,220,200,0.6)"></div>Aura 启发场</div>
     <div class="item">点击气泡查看详情 · 拖拽移动 · 滚轮缩放</div>
   </div>
   <div id="toast"></div>
@@ -628,8 +650,10 @@ const nodeMap = new Map(nodes.map(n => [n.id, n]));
 // ═══════════════════════════════════════════════════════════
 // Draw
 // ═══════════════════════════════════════════════════════════
+const auraLayer = g.append("g").attr("class","aura-field");          // heatmap (bottom)
 const linkGroup = g.append("g").attr("class","links");
 const nodeGroup = g.append("g").attr("class","nodes");
+const auraTokensLayer = g.append("g").attr("class","aura-tokens");   // drifting tokens (top)
 
 const linkElements = linkGroup.selectAll("line").data(links).enter().append("line")
   .attr("stroke","rgba(255,180,100,0.15)")
@@ -712,8 +736,152 @@ function animateTokens() {{
 animateTokens();
 
 // ═══════════════════════════════════════════════════════════
-// Force simulation
+// Aura field — shared inspiration layer
+// H(p) = concentration(p) × entropy(p)
 // ═══════════════════════════════════════════════════════════
+let auraVisible = true;
+
+function auraIntensity(px, py, nodes) {{
+  // concentration: total affinity from all clusters (Gaussian kernels)
+  let sumW = 0;
+  const ws = [];
+  for (const n of nodes) {{
+    const dx = px - n.x, dy = py - n.y;
+    const sigma = n.radius * 1.6;  // atmosphere thickness scales with planet size
+    const w = Math.exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
+    ws.push(w); sumW += w;
+  }}
+  if (sumW <= 1e-9) return 0;
+  // entropy of belonging distribution q_i = w_i / Σw
+  let H = 0;
+  for (const w of ws) {{
+    const q = w / sumW;
+    if (q > 1e-9) H -= q * Math.log(q);
+  }}
+  return sumW * H;
+}}
+
+function renderAura() {{
+  if (!auraLayer) return;
+
+  // sample the field on a coarse grid
+  const step = 24;
+  const pts = [];
+  const xs = d3.range(0, width + step, step);
+  const ys = d3.range(0, height + step, step);
+  const vals = [];
+  for (const x of xs) for (const y of ys) {{
+    const v = auraIntensity(x, y, nodes);
+    vals.push(v);
+    pts.push({{x, y, v}});
+  }}
+  const vmax = d3.max(vals) || 1;
+
+  const cell = 26;
+  const opacityScale = d3.scaleSqrt().domain([0, vmax]).range([0, 0.32]);
+  const auraColor = v => d3.interpolateRgbBasis(["#1a2f5e", "#2b5aa0", "#3fa0d8", "#7fe3d4", "#c8f7e9"])(v / vmax);
+
+  auraLayer.selectAll("rect").remove();
+  auraLayer.selectAll("rect").data(pts).enter().append("rect")
+    .attr("x", d => d.x - cell/2).attr("y", d => d.y - cell/2)
+    .attr("width", cell + 1).attr("height", cell + 1)
+    .attr("fill", d => auraColor(d.v))
+    .attr("opacity", d => opacityScale(d.v))
+    .attr("pointer-events", "none");
+}}
+
+function renderAuraTokens() {{
+  if (!auraTokensLayer || !KB_DATA.auraTokens || KB_DATA.auraTokens.length === 0) return;
+  const auraList = KB_DATA.auraTokens;
+
+  // Position each cross-boundary token at the weighted midpoint of its clusters,
+  // offset outward so it sits in the boundary zone rather than planet centers.
+  const items = auraList.map((at, idx) => {{
+    let sx = 0, sy = 0, sw = 0;
+    at.clusterIds.forEach(cid => {{
+      const n = nodeMap.get(cid);
+      const w = (at.strengths && at.strengths[cid]) || 1;
+      if (n) {{ sx += n.x * w; sy += n.y * w; sw += w; }}
+    }});
+    if (sw <= 0) return null;
+    let x = sx / sw, y = sy / sw;
+    // push toward cluster-pair boundary: offset away from the strongest cluster
+    const strongest = at.clusterIds.reduce((a, b) =>
+      ((at.strengths[b] || 0) > (at.strengths[a] || 0) ? b : a));
+    const sn = nodeMap.get(strongest);
+    if (sn) {{
+      let dx = x - sn.x, dy = y - sn.y;
+      const d = Math.sqrt(dx*dx + dy*dy) || 1;
+      const r = Math.max(28, sn.radius * 0.55);
+      x = sn.x + dx / d * (sn.radius + r * 0.35);
+      y = sn.y + dy / d * (sn.radius + r * 0.35);
+    }}
+    const maxW = auraList[0].weight || 1;
+    return {{
+      text: at.text,
+      x, y,
+      ox: x, oy: y,
+      size: 11 + (at.weight / maxW) * 10,
+      opacity: 0.35 + (at.weight / maxW) * 0.5,
+      clusters: at.clusterIds,
+      weight: at.weight,
+      idx,
+    }};
+  }}).filter(Boolean);
+
+  // Simple collision: spread overlapping aura tokens vertically
+  items.sort((a,b) => b.weight - a.weight);
+  for (let i = 0; i < items.length; i++) {{
+    for (let j = i + 1; j < items.length; j++) {{
+      const a = items[i], b = items[j];
+      if (Math.abs(a.ox - b.ox) < 60 && Math.abs(a.oy - b.oy) < 16) {{
+        b.oy += (b.oy >= a.oy ? 1 : -1) * (16 + Math.random() * 8);
+        b.ox += (Math.random() - 0.5) * 30;
+      }}
+    }}
+  }}
+
+  auraTokensLayer.selectAll("text").remove();
+  auraTokensLayer.selectAll("text").data(items).enter().append("text")
+    .attr("class", "aura-token")
+    .attr("text-anchor", "middle")
+    .attr("fill", "#a8f0e0")
+    .attr("font-size", d => d.size)
+    .attr("font-weight", d => d.size > 17 ? "600" : "400")
+    .attr("opacity", d => d.opacity)
+    .attr("pointer-events", "none")
+    .attr("data-ax", d => d.ox)
+    .attr("data-ay", d => d.oy)
+    .attr("data-phase", d => d.idx * 1.7)
+    .text(d => d.text)
+    .style("filter", "drop-shadow(0 0 6px rgba(120,220,200,0.5))");
+}}
+
+function toggleAura() {{
+  auraVisible = !auraVisible;
+  const op = auraVisible ? 1 : 0;
+  if (auraLayer) auraLayer.style("opacity", op).style("display", auraVisible ? "" : "none");
+  if (auraTokensLayer) auraTokensLayer.style("opacity", op).style("display", auraVisible ? "" : "none");
+  document.getElementById("btn-aura").classList.toggle("active", auraVisible);
+}}
+
+// Gentle drift animation for aura tokens (separate rhythm from planet tokens)
+let auraT = 0;
+function animateAuraTokens() {{
+  auraT += 0.012;
+  d3.selectAll(".aura-token").each(function() {{
+    const el = d3.select(this);
+    const ax = parseFloat(el.attr("data-ax"));
+    const ay = parseFloat(el.attr("data-ay"));
+    const ph = parseFloat(el.attr("data-phase"));
+    const dx = Math.sin(auraT * 0.7 + ph) * 7;
+    const dy = Math.cos(auraT * 0.5 + ph * 1.3) * 5;
+    el.attr("x", ax + dx).attr("y", ay + dy);
+  }});
+  requestAnimationFrame(animateAuraTokens);
+}}
+
+
 const simulation = d3.forceSimulation(nodes)
   .force("link", d3.forceLink(links).id(d => d.id)
     .distance(d => 200 + (1-d.score)*100).strength(d => d.score * 0.3))
@@ -732,6 +900,9 @@ function ticked() {{
     .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
   nodeElements.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
 }}
+
+// Render the Aura field once the layout has settled
+simulation.on("end", () => {{ renderAura(); renderAuraTokens(); animateAuraTokens(); }});
 
 function dragStarted(event,d) {{ if(!event.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }}
 function dragged(event,d) {{ d.fx=event.x; d.fy=event.y; }}
@@ -897,7 +1068,7 @@ Examples:
 
     # Generate HTML
     if args.mode == "bubble":
-        data = build_bubble_data(clusters, token_details, sim_matrix, stats)
+        data = build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=tokenizer)
         html = generate_bubble_html(json.dumps(data, ensure_ascii=False))
     else:
         html = generate_cards_html(
