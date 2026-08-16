@@ -316,8 +316,88 @@ CLUSTER_COLORS = [
 ]
 
 
-def build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=None):
-    """Build JSON data for the bubble template (planets + Aura layer)."""
+def load_docs_with_text(conn, tokenizer, clusters):
+    """Load all docs with cluster membership and full text rebuilt from chunk_tokens.
+
+    This is the data source for the sub-pages (docs view / clusters view / reader).
+    Rebuilding from the DB (not the filesystem) keeps the views working even when
+    the original files are offline — chunk_tokens covers 100% of ingested docs.
+    """
+    import struct as _struct
+
+    cid_by_doc = {}
+    for c in clusters:
+        for did in c.get("member_doc_ids", []):
+            cid_by_doc[did] = c["cluster_id"]
+    label_by_cid = {c["cluster_id"]: c["label"] or c["cluster_id"] for c in clusters}
+    color_by_cid = {
+        c["cluster_id"]: CLUSTER_COLORS[i % len(CLUSTER_COLORS)]
+        for i, c in enumerate(clusters)
+    }
+
+    docs = []
+    for row in conn.execute(
+        "SELECT doc_id, file_path, total_tokens, chunk_count FROM documents"
+    ).fetchall():
+        did = row["doc_id"]
+        cid = cid_by_doc.get(did, "")
+        chunk_texts = []
+        for cr in conn.execute(
+            "SELECT token_ids FROM chunk_tokens WHERE doc_id=? ORDER BY chunk_idx",
+            (did,),
+        ).fetchall():
+            blob = cr["token_ids"]
+            if not blob:
+                continue
+            ids = list(_struct.unpack(f"{len(blob) // 4}I", blob))
+            try:
+                chunk_texts.append(tokenizer.decode(ids))
+            except Exception:
+                pass
+        docs.append({
+            "docId": did,
+            "path": row["file_path"] or "",
+            "clusterId": cid,
+            "clusterLabel": label_by_cid.get(cid, "未归簇"),
+            "color": color_by_cid.get(cid, "#888888"),
+            "tokens": row["total_tokens"] or 0,
+            "chunkCount": row["chunk_count"] or len(chunk_texts),
+            "chunks": chunk_texts,
+        })
+    docs.sort(key=lambda d: -d["tokens"])
+    return docs
+
+
+def load_token_vocab(conn, tokenizer, min_df=2, cap=400):
+    """Global token vocabulary for the tokens sub-page: token_id, decoded, DF.
+
+    DF (document frequency) comes from token_doc_freq. Tokens with DF=1 are
+    hapax legomena (~noise for browsing), so they are excluded by default.
+    """
+    vocab = []
+    rows = conn.execute(
+        "SELECT token_id, doc_count FROM token_doc_freq WHERE doc_count >= ? "
+        "ORDER BY doc_count DESC, token_id LIMIT ?",
+        (min_df, cap),
+    ).fetchall()
+    for r in rows:
+        try:
+            decoded = tokenizer.decode([int(r["token_id"])])
+        except Exception:
+            continue
+        decoded = decoded.strip().replace("\n", " ")
+        # 跳过空白/纯标点 token (PDF 提取的结构噪声)
+        if not decoded or not any(ch.isalnum() for ch in decoded):
+            continue
+        # 跳过单字符 ASCII 字母数字 ("0","1","a"...) — BM25 有效但对浏览无意义
+        if len(decoded) == 1 and decoded.isascii():
+            continue
+        vocab.append({"t": decoded, "df": r["doc_count"]})
+    return vocab
+
+
+def build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=None, conn=None):
+    """Build JSON data for the bubble template (planets + Aura layer + sub-pages)."""
     from kb_agent.aura import compute_aura_tokens, aura_summary
 
     nodes = []
@@ -381,9 +461,14 @@ def build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=None
     print(f"   Aura: {summary['aura_tokens']} inspiration tokens, "
           f"{len(summary['bridged_pairs'])} bridged cluster pairs")
 
+    docs = load_docs_with_text(conn, tokenizer, clusters) if conn is not None else []
+    vocab = load_token_vocab(conn, tokenizer) if conn is not None else []
+
     return {
         "nodes": nodes,
         "auraTokens": aura_tokens,
+        "docs": docs,
+        "vocab": vocab,
         "stats": stats,
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dbPath": get_db_path(),
@@ -443,6 +528,90 @@ svg {{ width: 100%; height: 100%; display: block; }}
 }}
 #stats-overlay .stat {{ display: flex; gap: 4px; align-items: center; }}
 #stats-overlay .stat-val {{ color: #70b4ff; font-weight: 600; }}
+#stats-overlay .stat-click {{ cursor: pointer; padding: 2px 6px; border-radius: 6px; transition: background 0.2s; border: 1px solid transparent; }}
+#stats-overlay .stat-click:hover {{ background: rgba(80,120,220,0.25); border-color: rgba(100,180,255,0.4); }}
+
+/* ── Sub-pages (docs / clusters / tokens browser) ── */
+#subpage {{
+  position: absolute; inset: 0; z-index: 30;
+  background: rgba(8,12,24,0.97); backdrop-filter: blur(16px);
+  display: none; flex-direction: column;
+}}
+#subpage.visible {{ display: flex; animation: fadein 0.25s ease; }}
+@keyframes fadein {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+.subpage-header {{
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 22px; border-bottom: 1px solid rgba(80,120,200,0.2);
+  flex-shrink: 0;
+}}
+.subpage-header .back-btn {{
+  background: rgba(60,100,180,0.3); border: 1px solid rgba(100,140,220,0.3);
+  border-radius: 8px; padding: 6px 14px; color: #a0c4ff; font-size: 13px; cursor: pointer;
+}}
+.subpage-header .back-btn:hover {{ background: rgba(60,100,180,0.5); }}
+.subpage-title {{ font-size: 16px; font-weight: 600; color: #e0e6f0; }}
+.subpage-sub {{ font-size: 12px; color: rgba(160,180,210,0.6); }}
+.subpage-filter {{
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(100,140,220,0.3);
+  border-radius: 8px; padding: 7px 12px; color: #e0e6f0; font-size: 12px;
+  outline: none; width: 220px; margin-left: auto;
+}}
+.subpage-body {{ flex: 1; overflow-y: auto; padding: 20px 22px; }}
+.subpage-body::-webkit-scrollbar {{ width: 8px; }}
+.subpage-body::-webkit-scrollbar-thumb {{ background: rgba(100,140,220,0.3); border-radius: 4px; }}
+
+.doc-row {{
+  display: flex; align-items: center; gap: 14px;
+  background: rgba(22,28,48,0.85); border: 1px solid rgba(80,120,200,0.18);
+  border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; cursor: pointer;
+  transition: border-color 0.2s, transform 0.15s;
+}}
+.doc-row:hover {{ border-color: rgba(100,180,255,0.55); transform: translateX(3px); }}
+.doc-row .doc-dot {{ width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }}
+.doc-row .doc-name {{ font-size: 13px; color: #e0e6f0; font-weight: 500; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.doc-row .doc-meta {{ font-size: 11px; color: rgba(160,180,210,0.65); flex-shrink: 0; }}
+.doc-row .doc-open {{
+  font-size: 11px; color: #80a8d8; flex-shrink: 0; padding: 3px 8px; border-radius: 6px;
+  border: 1px solid rgba(100,140,220,0.25); cursor: pointer;
+}}
+.doc-row .doc-open:hover {{ background: rgba(60,100,180,0.35); color: #c0d8ff; }}
+
+.cluster-group-title {{
+  font-size: 13px; font-weight: 600; margin: 22px 0 10px; display: flex; align-items: center; gap: 8px;
+}}
+.cluster-group-title:first-child {{ margin-top: 0; }}
+.cluster-group-title .cg-dot {{ width: 9px; height: 9px; border-radius: 50%; }}
+.cluster-group-title .cg-count {{ font-size: 11px; color: rgba(160,180,210,0.5); font-weight: 400; }}
+
+/* Reader */
+#reader {{
+  position: absolute; inset: 0; z-index: 40;
+  background: rgba(8,12,24,0.99); backdrop-filter: blur(16px);
+  display: none; flex-direction: column;
+}}
+#reader.visible {{ display: flex; animation: fadein 0.25s ease; }}
+.reader-header {{ display: flex; align-items: center; gap: 14px; padding: 14px 22px;
+  border-bottom: 1px solid rgba(80,120,200,0.2); flex-shrink: 0; flex-wrap: wrap; }}
+.reader-title {{ font-size: 14px; font-weight: 600; color: #e0e6f0; max-width: 45vw;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.reader-body {{ flex: 1; overflow-y: auto; padding: 26px max(6vw, 40px); }}
+.reader-body::-webkit-scrollbar {{ width: 8px; }}
+.reader-body::-webkit-scrollbar-thumb {{ background: rgba(100,140,220,0.3); border-radius: 4px; }}
+.reader-content {{ max-width: 860px; margin: 0 auto; font-size: 14px; line-height: 1.85; color: #c8d2e0;
+  white-space: pre-wrap; word-break: break-word; }}
+.reader-nav {{ display: flex; align-items: center; gap: 10px; margin-left: auto; flex-shrink: 0; }}
+.reader-nav .rn-btn {{
+  background: rgba(60,100,180,0.3); border: 1px solid rgba(100,140,220,0.3);
+  border-radius: 8px; padding: 5px 12px; color: #a0c4ff; font-size: 12px; cursor: pointer;
+}}
+.reader-nav .rn-btn:hover {{ background: rgba(60,100,180,0.5); }}
+.reader-nav .rn-btn:disabled {{ opacity: 0.3; cursor: default; }}
+.reader-nav .rn-label {{ font-size: 11px; color: rgba(160,180,210,0.6); }}
+.reader-progress {{ height: 3px; background: rgba(100,140,220,0.15); flex-shrink: 0; }}
+.reader-progress .rp-fill {{ height: 100%; background: linear-gradient(90deg, #3fa0d8, #7fe3d4);
+  width: 0%; transition: width 0.2s; }}
+
 
 #info-panel {{
   position: absolute; top: 12px; right: 12px; z-index: 10;
@@ -515,11 +684,38 @@ svg {{ width: 100%; height: 100%; display: block; }}
   </div>
   <div id="legend">
     <div class="item"><div class="dot" style="background:rgba(100,180,255,0.5)"></div>Cluster</div>
-    <div class="item"><div class="dot" style="background:rgba(100,255,180,0.5)"></div>Token</div>
     <div class="item"><div class="dot" style="background:rgba(255,180,100,0.5)"></div>关联线</div>
     <div class="item"><div class="dot" style="background:rgba(120,220,200,0.6)"></div>Aura 启发场</div>
-    <div class="item">点击气泡查看详情 · 拖拽移动 · 滚轮缩放</div>
+    <div class="item">点击顶部数字进入二级页面 · 点击气泡详情 · 拖拽 · 滚轮缩放</div>
   </div>
+
+  <!-- ══ 二级页面: docs / clusters / tokens ══ -->
+  <div id="subpage">
+    <div class="subpage-header">
+      <button class="back-btn" onclick="closeSubpage()">← 返回星图</button>
+      <span class="subpage-title" id="subpage-title">—</span>
+      <span class="subpage-sub" id="subpage-sub"></span>
+      <input class="subpage-filter" id="subpage-filter" type="text" placeholder="过滤文件名 / 簇名..." />
+    </div>
+    <div class="subpage-body" id="subpage-body"></div>
+  </div>
+
+  <!-- ══ 阅读器 ══ -->
+  <div id="reader">
+    <div class="reader-header">
+      <button class="back-btn" onclick="closeReader()" style="background:rgba(60,100,180,0.3);border:1px solid rgba(100,140,220,0.3);border-radius:8px;padding:6px 14px;color:#a0c4ff;font-size:13px;cursor:pointer;">← 返回列表</button>
+      <span class="reader-title" id="reader-title">—</span>
+      <span class="doc-open" id="reader-open" title="在 Finder 打开原件">📂 原件</span>
+      <div class="reader-nav">
+        <button class="rn-btn" id="rn-prev" onclick="readerPrev()">‹ 上一页</button>
+        <span class="rn-label" id="rn-label">—</span>
+        <button class="rn-btn" id="rn-next" onclick="readerNext()">下一页 ›</button>
+      </div>
+    </div>
+    <div class="reader-progress"><div class="rp-fill" id="rp-fill"></div></div>
+    <div class="reader-body"><div class="reader-content" id="reader-content"></div></div>
+  </div>
+
   <div id="toast"></div>
   <div id="loading"><div class="spinner"></div><p>构建知识图谱中...</p></div>
   <svg id="bubble-svg"></svg>
@@ -531,14 +727,14 @@ svg {{ width: 100%; height: 100%; display: block; }}
 // ═══════════════════════════════════════════════════════════
 const KB_DATA = {data_json};
 
-// Stats overlay
+// Stats overlay — 每个数字可点击进入二级页面
 (function() {{
   const s = KB_DATA.stats;
   const overlay = document.getElementById('stats-overlay');
   overlay.innerHTML = `
-    <div class="stat"><span>📄</span><span class="stat-val">${{s.total_documents}}</span><span>docs</span></div>
-    <div class="stat"><span>🧩</span><span class="stat-val">${{s.total_clusters}}</span><span>clusters</span></div>
-    <div class="stat"><span>🔢</span><span class="stat-val">${{s.total_tokens.toLocaleString()}}</span><span>tokens</span></div>
+    <div class="stat stat-click" onclick="openSubpage('docs')" title="浏览全部文档原文"><span>📄</span><span class="stat-val">${{s.total_documents}}</span><span>docs</span></div>
+    <div class="stat stat-click" onclick="openSubpage('clusters')" title="按簇浏览"><span>🧩</span><span class="stat-val">${{s.total_clusters}}</span><span>clusters</span></div>
+    <div class="stat stat-click" onclick="openSubpage('tokens')" title="全局词表 / DF 分布"><span>🔢</span><span class="stat-val">${{s.total_tokens.toLocaleString()}}</span><span>tokens</span></div>
   `;
 }})();
 
@@ -916,6 +1112,17 @@ function showPanel(d) {{
   document.getElementById("panel-title").innerHTML = `${{d.label}} <span class="close-btn" onclick="closePanel()">✕</span>`;
   document.getElementById("panel-meta").textContent = `${{d.docCount}} docs · cluster_id: ${{d.id}}`;
   document.getElementById("panel-card").textContent = d.card || '(暂无知识档案)';
+  // 直达该簇的原文列表
+  const pm = document.getElementById("panel-card");
+  let goBtn = document.getElementById("panel-godocs");
+  if (!goBtn) {{
+    goBtn = document.createElement("div");
+    goBtn.id = "panel-godocs";
+    goBtn.style.cssText = "margin-top:10px;font-size:12px;color:#7fe3d4;cursor:pointer;border:1px solid rgba(120,220,200,0.35);border-radius:8px;padding:5px 10px;display:inline-block;";
+    goBtn.onclick = () => openSubpage("clusters", d.label);
+    pm.after(goBtn);
+  }}
+  goBtn.textContent = `📖 查看本簇 ${{d.docCount}} 篇原文 →`;
   const tc = document.getElementById("panel-tokens");
   tc.innerHTML = "";
   d.tokens.forEach(t => {{
@@ -970,8 +1177,194 @@ function searchToken(query) {{
 document.getElementById("search-input").addEventListener("input", e => {{ if(e.target.value) searchToken(e.target.value); else resetView(); }});
 
 // ═══════════════════════════════════════════════════════════
+// Sub-pages: docs / clusters / tokens browser + reader
+// ═══════════════════════════════════════════════════════════
+const DOCS = KB_DATA.docs || [];
+const VOCAB = KB_DATA.vocab || [];
+let subpageMode = null;      // 'docs' | 'clusters' | 'tokens'
+let subpageFilter = "";
+let readerDoc = null;        // 当前阅读的 doc 对象
+let readerPage = 0;          // chunk 分页索引 (每页 READER_PAGE chunks)
+const READER_PAGE = 8;       // 每页 8 chunks (~2000 tokens)
+let readerReturnTo = null;   // 阅读器返回目标: 'docs' | 'clusters'
+
+function esc(s) {{
+  return String(s ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+}}
+function fmtTok(n) {{
+  if (n >= 1e6) return (n/1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n/1e3).toFixed(1) + "k";
+  return String(n);
+}}
+function docBasename(d) {{
+  const p = d.path || "";
+  return p ? p.split("/").filter(Boolean).pop() : d.docId;
+}}
+
+function openSubpage(mode, presetFilter = "") {{
+  subpageMode = mode;
+  subpageFilter = presetFilter;
+  const sp = document.getElementById("subpage");
+  const body = document.getElementById("subpage-body");
+  const title = document.getElementById("subpage-title");
+  const sub = document.getElementById("subpage-sub");
+  const filter = document.getElementById("subpage-filter");
+  filter.value = presetFilter;
+  closePanel();
+
+  const titles = {{
+    docs: ["📄 文档库", DOCS.length + " 篇 · 点击进入阅读器 · 从 DB chunk 重建全文"],
+    clusters: ["🧩 簇文件夹", KB_DATA.nodes.length + " 簇 · 按主题分组浏览原文"],
+    tokens: ["🔢 词表", VOCAB.length + " 个共享 token (DF≥2) · 点击查命中簇与文档"],
+  }};
+  title.textContent = titles[mode][0];
+  sub.textContent = titles[mode][1];
+
+  renderSubpage();
+  sp.classList.add("visible");
+}}
+
+function closeSubpage() {{
+  document.getElementById("subpage").classList.remove("visible");
+  subpageMode = null;
+}}
+
+function renderSubpage() {{
+  const body = document.getElementById("subpage-body");
+  const q = subpageFilter.toLowerCase().trim();
+  if (subpageMode === "docs") body.innerHTML = renderDocsList(q, false);
+  else if (subpageMode === "clusters") body.innerHTML = renderClustersView(q);
+  else if (subpageMode === "tokens") body.innerHTML = renderTokensView(q);
+}}
+
+function docRow(d) {{
+  const name = esc(docBasename(d));
+  return `<div class="doc-row" onclick="openReader('${{d.docId}}')">
+    <div class="doc-dot" style="background:${{d.color}}"></div>
+    <span class="doc-name" title="${{esc(d.path)}}">${{name}}</span>
+    <span class="doc-meta">${{esc(d.clusterLabel)}} · ${{fmtTok(d.tokens)}} tok · ${{d.chunkCount}} chunks</span>
+    <span class="doc-open" onclick="event.stopPropagation(); openOriginal('${{esc(d.path)}}')" title="${{esc(d.path)}}">📂 原件</span>
+  </div>`;
+}}
+
+function renderDocsList(q, grouped) {{
+  let docs = DOCS;
+  if (q) docs = docs.filter(d =>
+    docBasename(d).toLowerCase().includes(q) || (d.clusterLabel||"").toLowerCase().includes(q));
+  if (!docs.length) return `<div class="empty" style="color:rgba(160,180,210,0.4);padding:40px;text-align:center;">无匹配文档</div>`;
+  return docs.map(docRow).join("");
+}}
+
+function renderClustersView(q) {{
+  // 按 KB_DATA.nodes 顺序(与星图一致), 组内按 tokens 降序
+  const byCid = {{}};
+  DOCS.forEach(d => {{
+    (byCid[d.clusterId] = byCid[d.clusterId] || []).push(d);
+  }});
+  let html = "";
+  KB_DATA.nodes.forEach(n => {{
+    let members = (byCid[n.id] || []).sort((a,b) => b.tokens - a.tokens);
+    if (q) {{
+      const hitCluster = (n.label||"").toLowerCase().includes(q);
+      const filtered = members.filter(d => docBasename(d).toLowerCase().includes(q));
+      if (!hitCluster && !filtered.length) return;
+      if (!hitCluster) members = filtered;
+    }}
+    const totalTok = members.reduce((s,d) => s + d.tokens, 0);
+    html += `<div class="cluster-group-title">
+      <div class="cg-dot" style="background:${{n.color}}"></div>
+      ${{esc(n.label)}} <span class="cg-count">· ${{members.length}} docs · ${{fmtTok(totalTok)}} tokens</span>
+    </div>`;
+    html += members.map(docRow).join("");
+  }});
+  // 孤儿文档 (有 doc 无簇)
+  const orphans = DOCS.filter(d => !d.clusterId);
+  if (orphans.length && (!q || "未归簇".includes(q))) {{
+    html += `<div class="cluster-group-title"><div class="cg-dot" style="background:#888"></div>未归簇 <span class="cg-count">· ${{orphans.length}} docs</span></div>`;
+    html += orphans.map(docRow).join("");
+  }}
+  return html || `<div class="empty" style="color:rgba(160,180,210,0.4);padding:40px;text-align:center;">无匹配簇</div>`;
+}}
+
+function renderTokensView(q) {{
+  let toks = VOCAB;
+  if (q) toks = toks.filter(t => t.t.toLowerCase().includes(q));
+  const maxDf = Math.max(...VOCAB.map(t => t.df), 1);
+  const rows = toks.slice(0, 600).map(t => {{
+    const w = (t.df / maxDf) * 100;
+    return `<div class="doc-row" onclick="searchToken('${{esc(t.t).replace(/'/g,"")}}'); closeSubpage();" style="cursor:pointer;">
+      <span class="doc-name" style="font-family:monospace;color:#ffd93d;flex:0 0 130px;">${{esc(t.t)}}</span>
+      <div style="flex:1;height:16px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;">
+        <div style="height:100%;width:${{w}}%;background:linear-gradient(90deg,#2a6db5,#4a9eff);"></div>
+      </div>
+      <span class="doc-meta">DF=${{t.df}}</span>
+    </div>`;
+  }}).join("");
+  return rows || `<div style="color:rgba(160,180,210,0.4);padding:40px;text-align:center;">无匹配 token</div>`;
+}}
+
+// ── 阅读器 ──
+function openReader(docId, returnTo) {{
+  const d = DOCS.find(x => x.docId === docId);
+  if (!d) {{ showToast("文档不存在"); return; }}
+  readerDoc = d;
+  readerPage = 0;
+  readerReturnTo = returnTo || subpageMode || "docs";
+  document.getElementById("reader-title").textContent = docBasename(d);
+  const openBtn = document.getElementById("reader-open");
+  openBtn.style.display = d.path ? "" : "none";
+  openBtn.onclick = () => openOriginal(d.path);
+  renderReaderPage();
+  document.getElementById("reader").classList.add("visible");
+  document.getElementById("subpage").classList.remove("visible");
+}}
+
+function closeReader() {{
+  document.getElementById("reader").classList.remove("visible");
+  readerDoc = null;
+  if (readerReturnTo) openSubpage(readerReturnTo);
+}}
+
+function renderReaderPage() {{
+  const d = readerDoc;
+  const chunks = d.chunks || [];
+  const totalPages = Math.max(1, Math.ceil(chunks.length / READER_PAGE));
+  readerPage = Math.min(Math.max(0, readerPage), totalPages - 1);
+  const start = readerPage * READER_PAGE;
+  const pageChunks = chunks.slice(start, start + READER_PAGE);
+  document.getElementById("reader-content").textContent = pageChunks.join("\\n");
+  document.getElementById("rn-label").textContent = `chunk ${{start+1}}–${{Math.min(start+READER_PAGE, chunks.length)}} / ${{chunks.length}} · 页 ${{readerPage+1}}/${{totalPages}}`;
+  document.getElementById("rn-prev").disabled = readerPage === 0;
+  document.getElementById("rn-next").disabled = readerPage >= totalPages - 1;
+  document.getElementById("rp-fill").style.width = `${{((readerPage+1)/totalPages)*100}}%`;
+  document.querySelector(".reader-body").scrollTop = 0;
+}}
+function readerPrev() {{ if (readerPage > 0) {{ readerPage--; renderReaderPage(); }} }}
+function readerNext() {{ readerPage++; renderReaderPage(); }}
+
+function openOriginal(path) {{
+  if (!path) return;
+  // file:// 直链 — Electron/Finder 会用系统默认应用打开
+  window.open("file://" + path, "_blank");
+  showToast("已在系统打开原件 (若被拦截请手动访问: " + path + ")");
+}}
+
+// filter 输入联动
+document.getElementById("subpage-filter").addEventListener("input", e => {{
+  subpageFilter = e.target.value;
+  renderSubpage();
+}});
+// Esc 返回上层
+document.addEventListener("keydown", e => {{
+  if (e.key !== "Escape") return;
+  if (document.getElementById("reader").classList.contains("visible")) closeReader();
+  else if (document.getElementById("subpage").classList.contains("visible")) closeSubpage();
+}});
+
+// ═══════════════════════════════════════════════════════════
 // Utils
 // ═══════════════════════════════════════════════════════════
+
 function resetView() {{
   nodeElements.each(function(d) {{
     d3.select(this).select(".bubble-bg").transition().duration(300)
@@ -1068,7 +1461,7 @@ Examples:
 
     # Generate HTML
     if args.mode == "bubble":
-        data = build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=tokenizer)
+        data = build_bubble_data(clusters, token_details, sim_matrix, stats, tokenizer=tokenizer, conn=conn)
         html = generate_bubble_html(json.dumps(data, ensure_ascii=False))
     else:
         html = generate_cards_html(
